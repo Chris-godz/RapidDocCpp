@@ -1,0 +1,21 @@
+---
+description: Shell 脚本职责边界与参数风格约束
+globs: ["*.sh"]
+alwaysApply: true
+---
+
+# 脚本职责
+
+- `build.sh`：仅编译（`release|debug`、`clean`、`test`）
+- `setup.sh`：仅下载模型、初始化子模块
+- `set_env.sh`：仅配置运行时环境变量
+
+# 禁止事项
+
+- `build.sh` 禁止安装依赖、下载模型、配置环境变量
+- `setup.sh` 禁止 apt 安装、禁止编译
+- `set_env.sh` 禁止编译、下载、安装
+
+# 参数解析
+
+- shell 参数解析使用 `case` 风格，保持简洁

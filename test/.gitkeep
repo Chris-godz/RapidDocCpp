@@ -1,0 +1,13 @@
+# Test directory placeholder
+# Unit tests will be placed here when BUILD_TESTS=ON
+
+
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.2
+    GIT_SHALLOW TRUE
+)
+
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(nlohmann_json)

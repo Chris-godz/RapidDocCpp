@@ -1,0 +1,23 @@
+---
+description: DEEPX NPU 推理、支持矩阵与模型管理约束
+globs: ["src/**/*.cpp", "include/**/*.h"]
+alwaysApply: false
+---
+
+# 推理引擎
+
+- 使用 `dxrt::InferenceEngine` API
+- Layout：DX NPU 主模型 + ONNX Runtime NMS 后处理
+- Table：仅有线表格（UNET）
+
+# 不支持能力处理
+
+- 公式识别：不支持
+- 无线表格（SLANet）：不支持
+- 表格分类：不支持
+- 对不支持能力必须显式标记 `skip`，不可留空实现
+
+# 模型管理
+
+- `.dxnn/.onnx` 模型放 `engine/model_files/`
+- OCR 模型由 `DXNN-OCR-cpp` 子模块管理

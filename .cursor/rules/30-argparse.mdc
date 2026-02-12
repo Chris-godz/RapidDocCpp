@@ -1,0 +1,14 @@
+---
+description: 参数解析统一规范（C++ 与 shell 分别约束）
+globs: ["app/**/*.cpp", "src/server/**/*.cpp", "src/**/*main*.cpp", "include/**/*.h", "*.sh"]
+alwaysApply: true
+---
+
+# C++ 参数解析
+
+- CLI / Server 参数解析统一使用 `getopt_long`（`<getopt.h>`）
+- 不手写参数循环逻辑
+
+# shell 参数解析
+
+- 使用 `case` 处理关键字参数（如 clean/debug/release/test）

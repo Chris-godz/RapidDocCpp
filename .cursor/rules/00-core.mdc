@@ -1,0 +1,19 @@
+---
+description: RapidDocCpp 核心总则（功能解耦、单一职责）
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# 核心原则
+
+- 功能解耦，单一职责
+- 每个文件 / 脚本 / 模块只做一件事
+- 新增功能时先判断归属模块，不跨层混写
+- 优先使用成熟标准接口，不重复造轮子
+
+# 项目结构
+
+- 头文件：`include/<module>/`
+- 实现文件：`src/<module>/`
+- 第三方依赖：`3rd-party/`（git submodule 管理）
+- 模型目录：`engine/model_files/`（不纳入版本管理）

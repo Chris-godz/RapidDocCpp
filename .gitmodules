@@ -1,0 +1,30 @@
+[submodule "3rd-party/DXNN-OCR-cpp"]
+	path = 3rd-party/DXNN-OCR-cpp
+	url = git@github.com:DEEPX-AI/DXNN-OCR-cpp.git
+[submodule "3rd-party/opencv"]
+	path = 3rd-party/opencv
+	url = https://github.com/opencv/opencv.git
+[submodule "3rd-party/opencv_contrib"]
+	path = 3rd-party/opencv_contrib
+	url = https://github.com/opencv/opencv_contrib.git
+[submodule "3rd-party/json"]
+	path = 3rd-party/json
+	url = https://github.com/nlohmann/json.git
+[submodule "3rd-party/spdlog"]
+	path = 3rd-party/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "3rd-party/clipper2"]
+	path = 3rd-party/clipper2
+	url = https://github.com/AngusJohnson/Clipper2.git
+[submodule "3rd-party/crow"]
+	path = 3rd-party/crow
+	url = https://github.com/CrowCpp/Crow.git
+[submodule "3rd-party/cpp-base64"]
+	path = 3rd-party/cpp-base64
+	url = https://github.com/ReneNyffenegger/cpp-base64.git
+[submodule "3rd-party/googletest"]
+	path = 3rd-party/googletest
+	url = https://github.com/google/googletest.git
+[submodule "3rd-party/poppler"]
+	path = 3rd-party/poppler
+	url = https://gitlab.freedesktop.org/poppler/poppler.git

@@ -1,0 +1,17 @@
+---
+description: CMake 构建系统分层与默认选项规范
+globs: ["CMakeLists.txt", "**/CMakeLists.txt", "*.cmake", "cmake/**/*.cmake"]
+alwaysApply: true
+---
+
+# CMake 规范
+
+- 在 CMake 中用 `option()` 设默认值
+- `build.sh` 不重复指定已有默认值
+- 每个模块独立一个 `CMakeLists.txt`
+- 根 CMake 只做全局配置与 `add_subdirectory`
+
+# 构建风格
+
+- `build.sh` 参数风格参考：`./build.sh [release|debug] [clean] [test]`
+- 仅实现编译相关流程，避免脚本职责外扩
