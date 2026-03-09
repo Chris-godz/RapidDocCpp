@@ -23,6 +23,15 @@ struct ModelPaths {
     // Table recognition (DEEPX NPU — wired tables only)
     std::string tableUnetDxnnModel;    // .dxnn model for UNET table segmentation
 
+    // Table classification & wireless table (ONNX Runtime)
+    std::string tableClsOnnxModel;     // .onnx model for table classification
+    std::string tableSlanetOnnxModel;  // .onnx model for SLANet wireless table
+    std::string tableSlanetDictPath;   // Dictionary for SLANet token decoding
+
+    // Formula recognition (ONNX Runtime)
+    std::string formulaOnnxModel;      // .onnx model for formula recognition
+    std::string formulaDictPath;       // Dictionary for formula token decoding
+
     // OCR models are managed by DXNN-OCR-cpp subproject
     // Set via OCRPipelineConfig — see ocr_pipeline.h
     std::string ocrModelDir;           // Base directory for OCR .dxnn models
@@ -46,9 +55,9 @@ struct PipelineStages {
     bool enableMarkdownOutput = true;   // Generate Markdown output
 
     // [NPU_UNSUPPORTED] — disabled by default, stubs only
-    bool enableFormula = false;         // Formula/equation recognition
-    bool enableWirelessTable = false;   // Wireless table recognition (SLANet)
-    bool enableTableClassify = false;   // Table type classification
+    bool enableFormula = true;         // Formula/equation recognition
+    bool enableWirelessTable = true;   // Wireless table recognition (SLANet)
+    bool enableTableClassify = true;   // Table type classification
 };
 
 /**
@@ -60,11 +69,16 @@ struct RuntimeConfig {
     int maxConcurrentPages = 4;         // Parallel PDF rendering limit
     
     // Layout detection
-    float layoutConfThreshold = 0.5f;   // Layout detection confidence threshold
-    int layoutInputSize = 800;          // Layout model input size
+    // PP-DocLayout-L uses 640x640 input (PP-DocLayout-Plus-L uses 800x800)
+    // DXNN split model is PP-DocLayout-L, consistent with Python RapidDoc DXEngine path
+    float layoutConfThreshold = 0.4f;   // Layout detection confidence threshold
+    int layoutInputSize = 640;          // Layout model input size (PP-DocLayout-L)
 
     // Table recognition
     float tableConfThreshold = 0.5f;    // Table detection confidence threshold
+
+    // Table cell OCR backfill
+    bool enableTableCellOcr = true;     // Run OCR on table cells and fill <td> text
 
     // Output
     std::string outputDir = "./output"; // Output directory

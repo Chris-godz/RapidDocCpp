@@ -11,6 +11,7 @@
 #define CROW_MAIN
 #endif
 #include <crow.h>
+#include <nlohmann/json.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -140,7 +141,7 @@ void DocServer::run() {
             }
 
             std::string data = body["data"].s();
-            std::string filename = body.has("filename") ? body["filename"].s() : "upload.pdf";
+            std::string filename = body.has("filename") ? std::string(body["filename"].s()) : "upload.pdf";
 
             // Decode base64
             auto decoded = base64Decode(data);

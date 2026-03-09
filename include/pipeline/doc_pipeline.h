@@ -23,6 +23,7 @@
 #include "pdf/pdf_renderer.h"
 #include "layout/layout_detector.h"
 #include "table/table_recognizer.h"
+#include "formula/formula_recognizer.h"
 #include "reading_order/xycut.h"
 #include "output/markdown_writer.h"
 #include "output/content_list.h"
@@ -31,11 +32,9 @@
 #include <functional>
 #include <vector>
 
-// Forward declaration for DXNN-OCR-cpp types
+// Forward declaration for DXNN-OCR-cpp types (see pipeline/ocr_pipeline.h)
 namespace ocr {
     class OCRPipeline;
-    struct OCRPipelineConfig;
-    struct PipelineOCRResult;
 }
 
 namespace rapid_doc {
@@ -115,6 +114,20 @@ private:
     );
 
     /**
+     * @brief Run OCR on a single table crop and distribute text into cells.
+     * 
+     * Uses the global OCR pipeline to recognize text on the table image,
+     * then assigns OCR segments to TableResult.cells by geometric containment.
+     */
+    void runTableCellOcr(
+        const cv::Mat& tableImage,
+        const cv::Rect& tableRoi,
+        TableResult& tableResult,
+        const std::vector<LayoutBox>& formulaBoxes,
+        const std::vector<LayoutBox>& figureBoxes
+    );
+
+    /**
      * @brief Run table recognition on detected table regions
      * @param image Full page image
      * @param tableBoxes Layout boxes classified as table
@@ -122,7 +135,17 @@ private:
      */
     std::vector<ContentElement> runTableRecognition(
         const cv::Mat& image,
-        const std::vector<LayoutBox>& tableBoxes
+        const std::vector<LayoutBox>& tableBoxes,
+        const std::vector<LayoutBox>& formulaBoxes,
+        const std::vector<LayoutBox>& figureBoxes
+    );
+
+    /**
+     * @brief Run formula recognition on detected formula regions
+     */
+    std::vector<ContentElement> runFormulaRecognition(
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& formulaBoxes
     );
 
     /**
@@ -155,7 +178,9 @@ private:
     std::unique_ptr<PdfRenderer> pdfRenderer_;
     std::unique_ptr<LayoutDetector> layoutDetector_;
     std::unique_ptr<TableRecognizer> tableRecognizer_;
+    std::unique_ptr<FormulaRecognizer> formulaRecognizer_;
     std::unique_ptr<ocr::OCRPipeline> ocrPipeline_;
+    bool ocrRunning_ = false;  // tracks whether OCR async threads are active
 
     // Output writers
     MarkdownWriter markdownWriter_;

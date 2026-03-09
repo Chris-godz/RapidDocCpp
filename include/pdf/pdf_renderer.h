@@ -61,8 +61,8 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
     PdfRenderConfig config_;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace rapid_doc

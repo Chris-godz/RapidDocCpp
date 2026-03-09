@@ -34,10 +34,10 @@ if [ "${BUILD_OPENCV_FROM_SOURCE}" = "OFF" ]; then
 fi
 
 if [ "$BUILD_TESTS" = true ]; then
-    CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS} -DBUILD_TESTS=ON"
+    CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS} -DRAPIDDOC_BUILD_TESTS=ON"
     echo "Building with unit tests enabled"
 else
-    CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS} -DBUILD_TESTS=OFF"
+    CMAKE_EXTRA_ARGS="${CMAKE_EXTRA_ARGS} -DRAPIDDOC_BUILD_TESTS=OFF"
 fi
 
 INSTALL_PREFIX="$(pwd)"
@@ -58,9 +58,20 @@ if [ "$BUILD_TESTS" = true ]; then
     echo "========================================="
     echo "Running unit tests..."
     echo "========================================="
-    if [ -f "bin/rapid_doc_tests" ]; then
-        ./bin/rapid_doc_tests --gtest_color=yes
+    if command -v ctest &> /dev/null; then
+        ctest --output-on-failure --test-dir . -j$(nproc)
     else
-        echo "Warning: rapid_doc_tests not found"
+        echo "Warning: ctest not found. Running test executables directly..."
+        TESTS_FOUND=0
+        for test_bin in bin/test_*; do
+            if [ -x "$test_bin" ]; then
+                echo "--- Running $test_bin ---"
+                ./"$test_bin" --gtest_color=yes
+                TESTS_FOUND=1
+            fi
+        done
+        if [ "$TESTS_FOUND" -eq 0 ]; then
+            echo "Warning: No test executables found in bin/"
+        fi
     fi
 fi

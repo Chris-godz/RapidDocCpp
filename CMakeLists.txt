@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ========================================
 option(BUILD_CLI "Build CLI application" ON)
 option(BUILD_SERVER "Build HTTP API server" ON)
-option(BUILD_TESTS "Build unit tests" OFF)
+option(RAPIDDOC_BUILD_TESTS "Build unit tests" OFF)
 option(BUILD_OPENCV_FROM_SOURCE "Build OpenCV from source (submodule)" ON)
 
 # Set default build type to Release
@@ -66,6 +66,11 @@ endif()
 include(cmake/BuildOpenCV.cmake)
 
 # ========================================
+# Poppler (PDF rendering)
+# ========================================
+include(cmake/FetchPoppler.cmake)
+
+# ========================================
 # ONNX Runtime (for Layout post-processing)
 # ========================================
 include(cmake/FindONNXRuntime.cmake)
@@ -112,6 +117,7 @@ add_subdirectory(src/common)
 add_subdirectory(src/pdf)
 add_subdirectory(src/layout)
 add_subdirectory(src/table)
+add_subdirectory(src/formula)
 add_subdirectory(src/reading_order)
 add_subdirectory(src/output)
 add_subdirectory(src/pipeline)
@@ -135,7 +141,7 @@ endif()
 # ========================================
 # Tests
 # ========================================
-if(BUILD_TESTS)
+if(RAPIDDOC_BUILD_TESTS)
     message(STATUS "Building unit tests")
     enable_testing()
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -160,5 +166,5 @@ message(STATUS "OpenCV Version: ${OpenCV_VERSION}")
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_FOUND}")
 message(STATUS "Build CLI: ${BUILD_CLI}")
 message(STATUS "Build Server: ${BUILD_SERVER}")
-message(STATUS "Build Tests: ${BUILD_TESTS}")
+message(STATUS "Build Tests: ${RAPIDDOC_BUILD_TESTS}")
 message(STATUS "========================================")

@@ -38,11 +38,14 @@ void printUsage(const char* programName) {
     std::cout << "      --no-table          Disable table recognition\n";
     std::cout << "      --no-ocr            Disable OCR\n";
     std::cout << "      --json-only         Output JSON only (no Markdown)\n";
+    std::cout << "      --enable-formula    Enable formula recognition (ONNX CPU)\n";
+    std::cout << "      --enable-wireless   Enable wireless table recognition (ONNX CPU)\n";
+    std::cout << "      --enable-table-cls  Enable table classification model (ONNX CPU)\n";
     std::cout << "  -v, --verbose           Verbose logging\n";
     std::cout << "  -h, --help              Show this help\n";
     std::cout << "\n";
-    std::cout << "Note: Formula recognition and wireless table recognition are not\n";
-    std::cout << "      supported on DEEPX NPU and will be skipped.\n";
+    std::cout << "Note: Formula recognition, table classification, and wireless table recognition\n";
+    std::cout << "      use ONNX Runtime.\n";
 }
 
 struct CliArgs {
@@ -53,6 +56,9 @@ struct CliArgs {
     bool enableTable = true;
     bool enableOcr = true;
     bool jsonOnly = false;
+    bool enableFormula = true;
+    bool enableWireless = true;
+    bool enableTableCls = true;
     bool verbose = false;
 };
 
@@ -60,20 +66,26 @@ enum LongOnlyOpt {
     OPT_NO_TABLE = 256,
     OPT_NO_OCR,
     OPT_JSON_ONLY,
+    OPT_ENABLE_FORMULA,
+    OPT_ENABLE_WIRELESS,
+    OPT_ENABLE_TABLE_CLS,
 };
 
 bool parseArgs(int argc, char* argv[], CliArgs& args) {
     static const struct option longOpts[] = {
-        {"input",     required_argument, nullptr, 'i'},
-        {"output",    required_argument, nullptr, 'o'},
-        {"dpi",       required_argument, nullptr, 'd'},
-        {"max-pages", required_argument, nullptr, 'm'},
-        {"no-table",  no_argument,       nullptr, OPT_NO_TABLE},
-        {"no-ocr",    no_argument,       nullptr, OPT_NO_OCR},
-        {"json-only", no_argument,       nullptr, OPT_JSON_ONLY},
-        {"verbose",   no_argument,       nullptr, 'v'},
-        {"help",      no_argument,       nullptr, 'h'},
-        {nullptr,     0,                 nullptr, 0}
+        {"input",           required_argument, nullptr, 'i'},
+        {"output",          required_argument, nullptr, 'o'},
+        {"dpi",             required_argument, nullptr, 'd'},
+        {"max-pages",       required_argument, nullptr, 'm'},
+        {"no-table",        no_argument,       nullptr, OPT_NO_TABLE},
+        {"no-ocr",          no_argument,       nullptr, OPT_NO_OCR},
+        {"json-only",       no_argument,       nullptr, OPT_JSON_ONLY},
+        {"enable-formula",  no_argument,       nullptr, OPT_ENABLE_FORMULA},
+        {"enable-wireless", no_argument,       nullptr, OPT_ENABLE_WIRELESS},
+        {"enable-table-cls",no_argument,       nullptr, OPT_ENABLE_TABLE_CLS},
+        {"verbose",         no_argument,       nullptr, 'v'},
+        {"help",            no_argument,       nullptr, 'h'},
+        {nullptr,           0,                 nullptr, 0}
     };
 
     int opt;
@@ -86,6 +98,9 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
             case OPT_NO_TABLE: args.enableTable = false; break;
             case OPT_NO_OCR:   args.enableOcr = false; break;
             case OPT_JSON_ONLY: args.jsonOnly = true; break;
+            case OPT_ENABLE_FORMULA: args.enableFormula = true; break;
+            case OPT_ENABLE_WIRELESS: args.enableWireless = true; break;
+            case OPT_ENABLE_TABLE_CLS: args.enableTableCls = true; break;
             case 'v': args.verbose = true; break;
             case 'h': printUsage(argv[0]); return false;
             default:  printUsage(argv[0]); return false;
@@ -128,6 +143,9 @@ int main(int argc, char* argv[]) {
     config.stages.enableWiredTable = args.enableTable;
     config.stages.enableOcr = args.enableOcr;
     config.stages.enableMarkdownOutput = !args.jsonOnly;
+    config.stages.enableFormula = args.enableFormula;
+    config.stages.enableWirelessTable = args.enableWireless;
+    config.stages.enableTableClassify = args.enableTableCls;
 
     // Create and initialize pipeline
     rapid_doc::DocPipeline pipeline(config);

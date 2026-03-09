@@ -23,31 +23,39 @@ namespace rapid_doc {
 /**
  * @brief PP-DocLayout category enumeration
  * 
- * Maps to PP-DocLayout-plus-L model's 20 categories.
+ * Maps to PP-DocLayout-L model's 23 categories (DXEngine path).
+ * The DXNN split model (pp_doclayout_l_part1.dxnn) outputs these class IDs.
+ * 
  * Categories marked [NPU_UNSUPPORTED] indicate pipeline stages
  * that cannot be processed by DEEPX NPU in the current version.
+ *
+ * For PP-DocLayout-Plus-L (ONNX, 20 categories), use LayoutCategoryPlusL.
  */
 enum class LayoutCategory : int {
-    TEXT = 0,
-    TITLE = 1,
-    FIGURE = 2,
-    FIGURE_CAPTION = 3,
-    TABLE = 4,
-    TABLE_CAPTION = 5,
-    TABLE_FOOTNOTE = 6,
-    HEADER = 7,
-    FOOTER = 8,
-    REFERENCE = 9,
-    EQUATION = 10,           // [NPU_UNSUPPORTED] Formula recognition
-    INTERLINE_EQUATION = 11, // [NPU_UNSUPPORTED] Formula recognition
-    STAMP = 12,
-    CODE = 13,
-    TOC = 14,                // Table of Contents
-    ABSTRACT = 15,
-    CONTENT = 16,
-    LIST = 17,
-    INDEX = 18,
-    SEPARATOR = 19,
+    // PP-DocLayout-L DXEngine output categories (indices 0-22)
+    PARAGRAPH_TITLE = 0,     // paragraph_title → Title
+    IMAGE = 1,               // image → ImageBody
+    TEXT = 2,                 // text → Text
+    NUMBER = 3,              // number → Abandon
+    ABSTRACT = 4,            // abstract → Text
+    CONTENT = 5,             // content → Text
+    FIGURE_TITLE = 6,        // figure_title → ImageCaption
+    FORMULA = 7,             // formula → InterlineEquation [NPU_UNSUPPORTED]
+    TABLE = 8,               // table → TableBody
+    TABLE_TITLE = 9,         // table_title → TableCaption
+    REFERENCE = 10,          // reference → Text
+    DOC_TITLE = 11,          // doc_title → Title
+    FOOTNOTE = 12,           // footnote → Abandon
+    HEADER = 13,             // header → Abandon
+    ALGORITHM = 14,          // algorithm → Text
+    FOOTER = 15,             // footer → Abandon
+    SEAL = 16,               // seal → Abandon
+    CHART_TITLE = 17,        // chart_title → ImageCaption
+    CHART = 18,              // chart → ImageBody
+    FORMULA_NUMBER = 19,     // formula_number → InterlineEquationNumber
+    HEADER_IMAGE = 20,       // header_image → Abandon
+    FOOTER_IMAGE = 21,       // footer_image → Abandon
+    ASIDE_TEXT = 22,         // aside_text → Text
     UNKNOWN = -1,
 };
 
@@ -176,7 +184,7 @@ struct ContentElement {
     float confidence = 0.0f;
     bool skipped = false;                 // True if NPU couldn't process this
 
-    // Normalized bbox (0-1000 scale, matching Python ContentList format)
+    // Normalized bbox (0-1000 scale)
     struct NormalizedBBox {
         int x0, y0, x1, y1;
     };
