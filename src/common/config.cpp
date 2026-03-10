@@ -10,15 +10,18 @@ PipelineConfig PipelineConfig::Default(const std::string& projectRoot) {
     PipelineConfig cfg;
 
     // Layout models
-    cfg.models.layoutDxnnModel = projectRoot + "/engine/model_files/layout/pp_doclayout_plus_l.dxnn";
-    cfg.models.layoutOnnxSubModel = projectRoot + "/engine/model_files/layout/pp_doclayout_plus_l_post.onnx";
+    cfg.models.layoutDxnnModel = projectRoot + "/engine/model_files/layout/pp_doclayout_l_part1.dxnn";
+    cfg.models.layoutOnnxSubModel = projectRoot + "/engine/model_files/layout/pp_doclayout_l_part2.onnx";
 
     // Table models (wired only)
     cfg.models.tableUnetDxnnModel = projectRoot + "/engine/model_files/table/unet.dxnn";
 
     // OCR models (managed by DXNN-OCR-cpp)
     cfg.models.ocrModelDir = projectRoot + "/3rd-party/DXNN-OCR-cpp/engine/model_files/server";
-    cfg.models.ocrDictPath = cfg.models.ocrModelDir + "/ppocrv5_dict.txt";
+    cfg.models.ocrDictPath = projectRoot + "/3rd-party/DXNN-OCR-cpp/engine/model_files/ppocrv5_dict.txt";
+
+    // Layout input size for pp_doclayout_l model
+    cfg.runtime.layoutInputSize = 640;
 
     return cfg;
 }

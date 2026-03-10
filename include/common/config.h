@@ -61,7 +61,7 @@ struct RuntimeConfig {
     
     // Layout detection
     float layoutConfThreshold = 0.5f;   // Layout detection confidence threshold
-    int layoutInputSize = 800;          // Layout model input size
+    int layoutInputSize = 640;          // Layout model input size (pp_doclayout_l)
 
     // Table recognition
     float tableConfThreshold = 0.5f;    // Table detection confidence threshold

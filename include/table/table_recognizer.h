@@ -27,7 +27,7 @@ namespace rapid_doc {
  */
 struct TableRecognizerConfig {
     std::string unetDxnnModelPath;   // .dxnn UNET model
-    int inputSize = 512;             // Model input size
+    int inputSize = 768;             // Model input size (matches Python DXNN target_size=768)
     float threshold = 0.5f;          // Segmentation threshold
     bool useAsync = false;           // Enable async inference
 };
@@ -68,21 +68,14 @@ public:
 
     bool isInitialized() const { return initialized_; }
 
-private:
     /**
-     * @brief Preprocess table image for UNET model
-     */
-    cv::Mat preprocess(const cv::Mat& image);
-
-    /**
-     * @brief Extract cells from UNET segmentation mask
-     */
-    std::vector<TableCell> extractCells(const cv::Mat& mask, const cv::Size& originalSize);
-
-    /**
-     * @brief Generate HTML from recognized cells
+     * @brief Generate HTML from recognized cells (public for re-generation after OCR fill)
      */
     std::string generateHtml(const std::vector<TableCell>& cells);
+
+private:
+    cv::Mat preprocess(const cv::Mat& image);
+    std::vector<TableCell> extractCells(const cv::Mat& mask, const cv::Size& originalSize);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

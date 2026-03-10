@@ -69,6 +69,8 @@ struct LayoutBox {
     LayoutCategory category;     // Detected element type
     float confidence;            // Detection confidence [0, 1]
     int index;                   // Original detection order
+    int clsId = -1;             // Original model class ID
+    std::string label;          // Original model label (e.g. "doc_title", "paragraph_title")
 
     // Convenience methods
     float width() const { return x1 - x0; }
@@ -94,6 +96,7 @@ struct LayoutResult {
     std::vector<LayoutBox> getBoxesByCategory(LayoutCategory cat) const;
     std::vector<LayoutBox> getTextBoxes() const;
     std::vector<LayoutBox> getTableBoxes() const;
+    std::vector<LayoutBox> getEquationBoxes() const;
     std::vector<LayoutBox> getSupportedBoxes() const;
     std::vector<LayoutBox> getUnsupportedBoxes() const;
 };

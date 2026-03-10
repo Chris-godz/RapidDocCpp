@@ -7,15 +7,18 @@ target_include_directories(doc_layout PUBLIC
     ${OpenCV_INCLUDE_DIRS}
 )
 
+# Link DXRT (DeepX Runtime) for NPU inference
+target_link_libraries(doc_layout
+    doc_common
+    ${OpenCV_LIBS}
+    spdlog::spdlog
+    dxrt
+    pthread
+)
+
 # Link ONNX Runtime if available (for post-processing sub-model)
 if(ONNXRUNTIME_FOUND)
     target_include_directories(doc_layout PRIVATE ${ONNXRUNTIME_INCLUDE_DIRS})
     target_link_libraries(doc_layout ${ONNXRUNTIME_LIBRARIES})
     target_compile_definitions(doc_layout PRIVATE HAS_ONNXRUNTIME=1)
 endif()
-
-target_link_libraries(doc_layout
-    doc_common
-    ${OpenCV_LIBS}
-    spdlog::spdlog
-)

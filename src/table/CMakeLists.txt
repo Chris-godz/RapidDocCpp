@@ -11,4 +11,6 @@ target_link_libraries(doc_table
     doc_common
     ${OpenCV_LIBS}
     spdlog::spdlog
+    dxrt
+    pthread
 )

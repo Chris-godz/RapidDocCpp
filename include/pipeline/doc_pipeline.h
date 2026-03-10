@@ -26,17 +26,11 @@
 #include "reading_order/xycut.h"
 #include "output/markdown_writer.h"
 #include "output/content_list.h"
+#include "pipeline/ocr_pipeline.h"
 #include <string>
 #include <memory>
 #include <functional>
 #include <vector>
-
-// Forward declaration for DXNN-OCR-cpp types
-namespace ocr {
-    class OCRPipeline;
-    struct OCRPipelineConfig;
-    struct PipelineOCRResult;
-}
 
 namespace rapid_doc {
 
@@ -96,6 +90,7 @@ public:
      * @brief Get current configuration
      */
     const PipelineConfig& config() const { return config_; }
+    void setOutputDir(const std::string& dir) { config_.runtime.outputDir = dir; }
 
 private:
     /**
@@ -143,9 +138,21 @@ private:
         std::vector<ContentElement>& elements
     );
 
+    void saveFormulaImages(
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& equationBoxes,
+        int pageIndex,
+        std::vector<ContentElement>& elements
+    );
+
     /**
-     * @brief Report progress
+     * @brief Run OCR on a single image crop and return combined text.
+     * @param crop BGR image to OCR
+     * @param taskId Unique task ID for the async OCR queue
+     * @return Recognized text (empty on failure)
      */
+    std::string ocrOnCrop(const cv::Mat& crop, int64_t taskId);
+
     void reportProgress(const std::string& stage, int current, int total);
 
     PipelineConfig config_;

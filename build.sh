@@ -58,9 +58,19 @@ if [ "$BUILD_TESTS" = true ]; then
     echo "========================================="
     echo "Running unit tests..."
     echo "========================================="
-    if [ -f "bin/rapid_doc_tests" ]; then
-        ./bin/rapid_doc_tests --gtest_color=yes
+    if [ -f "bin/rapiddoc_tests" ]; then
+        ./bin/rapiddoc_tests --gtest_color=yes
     else
-        echo "Warning: rapid_doc_tests not found"
+        echo "Warning: rapiddoc_tests not found"
+    fi
+
+    echo ""
+    echo "========================================="
+    echo "Running cross-validation tests..."
+    echo "========================================="
+    if [ -f "bin/rapiddoc_cross_tests" ]; then
+        ./bin/rapiddoc_cross_tests --gtest_color=yes
+    else
+        echo "Warning: rapiddoc_cross_tests not found"
     fi
 fi

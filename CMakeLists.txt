@@ -89,10 +89,20 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_BACKUP}")
 # ========================================
 # DXNN-OCR-cpp as Subproject
 # ========================================
-# Tell DXNN-OCR-cpp it's being built as a subproject
-# so it skips its own 3rd-party builds and executables
 set(DXNN_OCR_AS_SUBPROJECT ON CACHE BOOL "" FORCE)
-add_subdirectory(3rd-party/DXNN-OCR-cpp)
+if(EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/CMakeLists.txt"
+   AND EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/src/pipeline/ocr_pipeline.cpp")
+    # Share parent OpenCV and disable sub-project extras
+    set(BUILD_OPENCV_FROM_SOURCE OFF CACHE BOOL "" FORCE)
+    set(DXOCR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_OCR_SERVER OFF CACHE BOOL "" FORCE)
+    set(BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
+    add_subdirectory(3rd-party/DXNN-OCR-cpp)
+    set(HAS_DXNN_OCR ON)
+else()
+    message(WARNING "DXNN-OCR-cpp submodule not initialized — skipping OCR pipeline")
+    set(HAS_DXNN_OCR OFF)
+endif()
 
 # ========================================
 # Global Include Directories
@@ -102,34 +112,46 @@ include_directories(${CMAKE_SOURCE_DIR}/3rd-party/json/include)
 include_directories(${CMAKE_SOURCE_DIR}/3rd-party/spdlog/include)
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/3rd-party/clipper2/CPP/Clipper2Lib/include)
 
-# DXNN-OCR-cpp public headers
-include_directories(${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/include)
+if(HAS_DXNN_OCR)
+    include_directories(${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/include)
+endif()
 
 # ========================================
 # RapidDocCpp Libraries
 # ========================================
 add_subdirectory(src/common)
-add_subdirectory(src/pdf)
 add_subdirectory(src/layout)
 add_subdirectory(src/table)
-add_subdirectory(src/reading_order)
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/src/pdf/CMakeLists.txt")
+    add_subdirectory(src/pdf)
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/src/reading_order/CMakeLists.txt")
+    add_subdirectory(src/reading_order)
+endif()
 add_subdirectory(src/output)
-add_subdirectory(src/pipeline)
+if(HAS_DXNN_OCR AND EXISTS "${CMAKE_SOURCE_DIR}/src/pipeline/CMakeLists.txt")
+    add_subdirectory(src/pipeline)
+endif()
 
 # ========================================
 # CLI Application
 # ========================================
-if(BUILD_CLI)
+if(BUILD_CLI AND HAS_DXNN_OCR)
     message(STATUS "Building CLI application")
     add_subdirectory(app)
+else()
+    message(STATUS "Skipping CLI (requires DXNN-OCR-cpp)")
 endif()
 
 # ========================================
 # Server (HTTP API)
 # ========================================
-if(BUILD_SERVER)
+if(BUILD_SERVER AND HAS_DXNN_OCR)
     message(STATUS "Building HTTP API server")
     add_subdirectory(src/server)
+else()
+    message(STATUS "Skipping Server (requires DXNN-OCR-cpp)")
 endif()
 
 # ========================================

@@ -30,14 +30,10 @@ const char* layoutCategoryToString(LayoutCategory cat) {
 }
 
 bool isCategorySupported(LayoutCategory cat) {
-    switch (cat) {
-        case LayoutCategory::EQUATION:
-        case LayoutCategory::INTERLINE_EQUATION:
-            // Formula recognition not supported on DEEPX NPU
-            return false;
-        default:
-            return true;
-    }
+    // All categories are "supported" at the pipeline level;
+    // equations are handled separately (image fallback)
+    (void)cat;
+    return true;
 }
 
 std::vector<LayoutBox> LayoutResult::getBoxesByCategory(LayoutCategory cat) const {
@@ -60,13 +56,27 @@ std::vector<LayoutBox> LayoutResult::getTextBoxes() const {
                    b.category == LayoutCategory::REFERENCE ||
                    b.category == LayoutCategory::INDEX ||
                    b.category == LayoutCategory::HEADER ||
-                   b.category == LayoutCategory::FOOTER;
+                   b.category == LayoutCategory::FOOTER ||
+                   b.category == LayoutCategory::TABLE_CAPTION ||
+                   b.category == LayoutCategory::TABLE_FOOTNOTE ||
+                   b.category == LayoutCategory::FIGURE_CAPTION ||
+                   b.category == LayoutCategory::STAMP;
         });
     return result;
 }
 
 std::vector<LayoutBox> LayoutResult::getTableBoxes() const {
     return getBoxesByCategory(LayoutCategory::TABLE);
+}
+
+std::vector<LayoutBox> LayoutResult::getEquationBoxes() const {
+    std::vector<LayoutBox> result;
+    std::copy_if(boxes.begin(), boxes.end(), std::back_inserter(result),
+        [](const LayoutBox& b) {
+            return b.category == LayoutCategory::EQUATION ||
+                   b.category == LayoutCategory::INTERLINE_EQUATION;
+        });
+    return result;
 }
 
 std::vector<LayoutBox> LayoutResult::getSupportedBoxes() const {

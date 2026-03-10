@@ -32,3 +32,4 @@ engine/model_files/**/*.onnx
 .temp/
 output/
 logs/
+test/fixtures/e2e/

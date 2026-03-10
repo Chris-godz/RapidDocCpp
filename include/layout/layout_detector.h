@@ -30,7 +30,7 @@ namespace rapid_doc {
 struct LayoutDetectorConfig {
     std::string dxnnModelPath;      // .dxnn model for DEEPX NPU
     std::string onnxSubModelPath;   // .onnx sub-model for post-processing (NMS)
-    int inputSize = 800;            // Model input size (resize target)
+    int inputSize = 640;            // Model input size (640 for pp_doclayout_l, 800 for pp_doclayout_plus_l)
     float confThreshold = 0.5f;     // Detection confidence threshold
     bool useAsync = false;          // Enable async inference
 };
