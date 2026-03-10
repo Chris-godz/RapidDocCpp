@@ -3,14 +3,11 @@
  * @brief Run the full C++ pipeline on all test PDFs and save per-PDF results.
  *
  * Output structure per PDF:
- *   test/fixtures/e2e/cpp/{pdf_stem}/
- *       {pdf_stem}.md          -- Markdown output
- *       layout_page_{n}.json   -- Layout boxes per page
- *       content_list.json      -- Structured content
- *       summary.json           -- Page count, element counts, timing
+ *   {output_dir}/{pdf_stem}/{pdf_stem}.md, content_list.json, layout_page_*.json, summary.json
  *
  * Usage:
- *   ./run_cpp_e2e --project-root /path/to/RapidDocCpp [--pdf-dir test_files]
+ *   ./run_cpp_e2e [--pdf-dir test_files] [--output test/fixtures/e2e/cpp]
+ * Project root is set at build time (CMake PROJECT_ROOT_DIR); use --project-root to override.
  */
 
 #include "pipeline/doc_pipeline.h"
@@ -84,8 +81,23 @@ static json makeSummary(const DocumentResult& result, const std::string& pdfName
     return summary;
 }
 
+// Project root from CMake at build time (no need for --project-root in normal use)
+#define STRINGIFY_HELPER(x) #x
+#define STRINGIFY(x) STRINGIFY_HELPER(x)
+#ifdef PROJECT_ROOT_DIR
+static std::string getDefaultProjectRoot() {
+    std::string s = STRINGIFY(PROJECT_ROOT_DIR);
+    // Strip surrounding double quotes if CMake passed -DPROJECT_ROOT_DIR="/path"
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+        return s.substr(1, s.size() - 2);
+    return s;
+}
+#else
+static std::string getDefaultProjectRoot() { return "."; }
+#endif
+
 int main(int argc, char** argv) {
-    std::string projectRoot = ".";
+    std::string projectRoot = getDefaultProjectRoot();
     std::string pdfDir = "test_files";
     std::string outputDir = "test/fixtures/e2e/cpp";
 
@@ -98,6 +110,12 @@ int main(int argc, char** argv) {
         else if (arg == "--output" && i + 1 < argc)
             outputDir = argv[++i];
     }
+
+    // Resolve relative paths against project root so CWD doesn't matter
+    if (!fs::path(pdfDir).is_absolute())
+        pdfDir = (fs::path(projectRoot) / pdfDir).lexically_normal().string();
+    if (!fs::path(outputDir).is_absolute())
+        outputDir = (fs::path(projectRoot) / outputDir).lexically_normal().string();
 
     auto cfg = PipelineConfig::Default(projectRoot);
     cfg.stages.enablePdfRender = true;

@@ -1,6 +1,6 @@
 [submodule "3rd-party/DXNN-OCR-cpp"]
 	path = 3rd-party/DXNN-OCR-cpp
-	url = git@github.com:DEEPX-AI/DXNN-OCR-cpp.git
+	url = git@github.com:Chris-godz/DEEPX-OCR.git
 [submodule "3rd-party/opencv"]
 	path = 3rd-party/opencv
 	url = https://github.com/opencv/opencv.git

@@ -33,3 +33,5 @@ engine/model_files/**/*.onnx
 output/
 logs/
 test/fixtures/e2e/
+!/src/output/
+.download_cache/
