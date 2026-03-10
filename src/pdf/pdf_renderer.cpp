@@ -16,6 +16,7 @@
 #include <fstream>
 #include <filesystem>
 #include <memory>
+#include <algorithm>
 
 namespace rapid_doc {
 
@@ -72,19 +73,36 @@ std::vector<PageImage> PdfRenderer::renderFromMemory(const uint8_t* data, size_t
     }
 
     int totalPages = doc->pages();
-    int pagesToRender = totalPages;
-    if (config_.maxPages > 0 && config_.maxPages < pagesToRender)
-        pagesToRender = config_.maxPages;
+    int startPage = std::max(0, config_.startPageId);
+    if (startPage >= totalPages) {
+        LOG_WARN("Start page {} exceeds total pages {}", startPage, totalPages);
+        return {};
+    }
 
-    LOG_INFO("PDF: {} total pages, rendering {}", totalPages, pagesToRender);
+    int endPage = (config_.endPageId < 0)
+                      ? (totalPages - 1)
+                      : std::min(config_.endPageId, totalPages - 1);
+    if (endPage < startPage) {
+        LOG_WARN("Invalid page range: start={}, end={}", startPage, endPage);
+        return {};
+    }
+
+    if (config_.maxPages > 0) {
+        endPage = std::min(endPage, startPage + config_.maxPages - 1);
+    }
+
+    int pagesToRender = endPage - startPage + 1;
+
+    LOG_INFO("PDF: {} total pages, rendering {} pages ({}-{})",
+             totalPages, pagesToRender, startPage, endPage);
 
     std::vector<PageImage> results;
     results.reserve(pagesToRender);
 
-    for (int i = 0; i < pagesToRender; ++i) {
-        std::unique_ptr<poppler::page> page(doc->create_page(i));
+    for (int pageNo = startPage; pageNo <= endPage; ++pageNo) {
+        std::unique_ptr<poppler::page> page(doc->create_page(pageNo));
         if (!page) {
-            LOG_WARN("Failed to create page {}", i);
+            LOG_WARN("Failed to create page {}", pageNo);
             continue;
         }
 
@@ -96,7 +114,7 @@ std::vector<PageImage> PdfRenderer::renderFromMemory(const uint8_t* data, size_t
 
         poppler::image img = renderer.render_page(page.get(), config_.dpi, config_.dpi);
         if (!img.is_valid()) {
-            LOG_WARN("Failed to render page {}", i);
+            LOG_WARN("Failed to render page {}", pageNo);
             continue;
         }
 
@@ -120,14 +138,14 @@ std::vector<PageImage> PdfRenderer::renderFromMemory(const uint8_t* data, size_t
 
         PageImage pi;
         pi.image       = bgr.clone();
-        pi.pageIndex   = i;
+        pi.pageIndex   = pageNo;
         pi.dpi         = config_.dpi;
         pi.scaleFactor = config_.dpi / 72.0;
         pi.pdfWidth    = static_cast<int>(rect.width());
         pi.pdfHeight   = static_cast<int>(rect.height());
 
         results.push_back(std::move(pi));
-        LOG_DEBUG("Page {}: {}x{} px (pdf {}x{} pt)", i, imgW, imgH,
+        LOG_DEBUG("Page {}: {}x{} px (pdf {}x{} pt)", pageNo, imgW, imgH,
                   pi.pdfWidth, pi.pdfHeight);
     }
 

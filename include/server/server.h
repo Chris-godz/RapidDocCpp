@@ -13,6 +13,7 @@
 #include <string>
 #include <functional>
 #include <atomic>
+#include <mutex>
 
 namespace rapid_doc {
 
@@ -35,8 +36,10 @@ struct ServerConfig {
  * @brief HTTP server for document processing
  * 
  * REST API endpoints:
- *   POST /process           - Process uploaded PDF file
- *   POST /process/base64    - Process base64 encoded PDF
+ *   POST /file_parse        - Python RapidDoc-compatible batch parsing API
+ *   POST /v1/images:annotate- Vision API-compatible image annotation
+ *   POST /process           - Legacy single-file PDF processing
+ *   POST /process/base64    - Legacy base64 PDF processing
  *   GET  /health            - Health check
  *   GET  /status            - Server status and statistics
  */
@@ -69,6 +72,7 @@ private:
     std::atomic<uint64_t> requestCount_{0};
     std::atomic<uint64_t> successCount_{0};
     std::atomic<uint64_t> errorCount_{0};
+    std::mutex pipelineMutex_;
 
     // Internal handlers
     void setupRoutes();

@@ -192,6 +192,8 @@ struct ContentElement {
  */
 struct PageResult {
     int pageIndex = 0;
+    int pageWidth = 0;
+    int pageHeight = 0;
     LayoutResult layoutResult;
     std::vector<ContentElement> elements;  // Sorted by reading order
     std::vector<TableResult> tableResults;

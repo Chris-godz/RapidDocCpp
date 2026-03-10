@@ -69,6 +69,14 @@ public:
     DocumentResult processPdfFromMemory(const uint8_t* data, size_t size);
 
     /**
+     * @brief Process a single image as a single-page document.
+     * @param image Input image (BGR)
+     * @param pageIndex Page number metadata
+     * @return Complete single-page document result
+     */
+    DocumentResult processImageDocument(const cv::Mat& image, int pageIndex = 0);
+
+    /**
      * @brief Process a single page image (no PDF rendering)
      * @param image Page image (BGR)
      * @param pageIndex Page number (for output metadata)
@@ -91,6 +99,14 @@ public:
      */
     const PipelineConfig& config() const { return config_; }
     void setOutputDir(const std::string& dir) { config_.runtime.outputDir = dir; }
+    void setStageOptions(const PipelineStages& stages) { config_.stages = stages; }
+    void setSaveImages(bool save) { config_.runtime.saveImages = save; }
+    void setSaveVisualization(bool save) { config_.runtime.saveVisualization = save; }
+    void setPageRange(int startPageId, int endPageId) {
+        config_.runtime.startPageId = startPageId;
+        config_.runtime.endPageId = endPageId;
+    }
+    void setMaxPages(int maxPages) { config_.runtime.maxPages = maxPages; }
 
 private:
     /**
@@ -143,6 +159,12 @@ private:
         const std::vector<LayoutBox>& equationBoxes,
         int pageIndex,
         std::vector<ContentElement>& elements
+    );
+
+    void saveLayoutVisualization(
+        const cv::Mat& image,
+        const LayoutResult& layoutResult,
+        int pageIndex
     );
 
     /**

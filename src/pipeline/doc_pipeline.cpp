@@ -12,6 +12,8 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -44,6 +46,8 @@ bool DocPipeline::initialize() {
         PdfRenderConfig pdfCfg;
         pdfCfg.dpi = config_.runtime.pdfDpi;
         pdfCfg.maxPages = config_.runtime.maxPages;
+        pdfCfg.startPageId = config_.runtime.startPageId;
+        pdfCfg.endPageId = config_.runtime.endPageId;
         pdfCfg.maxConcurrentRenders = config_.runtime.maxConcurrentPages;
         pdfRenderer_ = std::make_unique<PdfRenderer>(pdfCfg);
         LOG_INFO("PDF renderer initialized");
@@ -138,8 +142,15 @@ DocumentResult DocPipeline::processPdf(const std::string& pdfPath) {
     auto renderStart = std::chrono::steady_clock::now();
     
     std::vector<PageImage> pageImages;
-    if (pdfRenderer_) {
-        pageImages = pdfRenderer_->renderFile(pdfPath);
+    if (config_.stages.enablePdfRender) {
+        PdfRenderConfig pdfCfg;
+        pdfCfg.dpi = config_.runtime.pdfDpi;
+        pdfCfg.maxPages = config_.runtime.maxPages;
+        pdfCfg.startPageId = config_.runtime.startPageId;
+        pdfCfg.endPageId = config_.runtime.endPageId;
+        pdfCfg.maxConcurrentRenders = config_.runtime.maxConcurrentPages;
+        PdfRenderer renderer(pdfCfg);
+        pageImages = renderer.renderFile(pdfPath);
     }
     
     auto renderEnd = std::chrono::steady_clock::now();
@@ -201,9 +212,18 @@ DocumentResult DocPipeline::processPdfFromMemory(const uint8_t* data, size_t siz
     }
 
     // Render from memory
+    auto startTime = std::chrono::steady_clock::now();
+
     std::vector<PageImage> pageImages;
-    if (pdfRenderer_) {
-        pageImages = pdfRenderer_->renderFromMemory(data, size);
+    if (config_.stages.enablePdfRender) {
+        PdfRenderConfig pdfCfg;
+        pdfCfg.dpi = config_.runtime.pdfDpi;
+        pdfCfg.maxPages = config_.runtime.maxPages;
+        pdfCfg.startPageId = config_.runtime.startPageId;
+        pdfCfg.endPageId = config_.runtime.endPageId;
+        pdfCfg.maxConcurrentRenders = config_.runtime.maxConcurrentPages;
+        PdfRenderer renderer(pdfCfg);
+        pageImages = renderer.renderFromMemory(data, size);
     }
     
     result.totalPages = static_cast<int>(pageImages.size());
@@ -219,6 +239,43 @@ DocumentResult DocPipeline::processPdfFromMemory(const uint8_t* data, size_t siz
     }
     result.contentListJson = contentListWriter_.generate(result);
 
+    for (const auto& page : result.pages) {
+        for (const auto& elem : page.elements) {
+            if (elem.skipped) result.skippedElements++;
+        }
+    }
+
+    auto endTime = std::chrono::steady_clock::now();
+    result.totalTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+
+    return result;
+}
+
+DocumentResult DocPipeline::processImageDocument(const cv::Mat& image, int pageIndex) {
+    auto startTime = std::chrono::steady_clock::now();
+
+    DocumentResult result;
+    if (!initialized_) {
+        LOG_ERROR("Pipeline not initialized");
+        return result;
+    }
+
+    PageResult pageResult = processImage(image, pageIndex);
+    result.pages.push_back(std::move(pageResult));
+    result.totalPages = 1;
+    result.processedPages = 1;
+
+    if (config_.stages.enableMarkdownOutput) {
+        result.markdown = markdownWriter_.generate(result);
+    }
+    result.contentListJson = contentListWriter_.generate(result);
+
+    for (const auto& elem : result.pages.front().elements) {
+        if (elem.skipped) result.skippedElements++;
+    }
+
+    auto endTime = std::chrono::steady_clock::now();
+    result.totalTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
     return result;
 }
 
@@ -240,6 +297,8 @@ PageResult DocPipeline::processPage(const PageImage& pageImage) {
     auto startTime = std::chrono::steady_clock::now();
     PageResult result;
     result.pageIndex = pageImage.pageIndex;
+    result.pageWidth = pageImage.image.cols;
+    result.pageHeight = pageImage.image.rows;
 
     const cv::Mat& image = pageImage.image;
     int pageWidth = image.cols;
@@ -255,6 +314,10 @@ PageResult DocPipeline::processPage(const PageImage& pageImage) {
 
         LOG_DEBUG("Page {}: detected {} layout boxes", 
                   pageImage.pageIndex, result.layoutResult.boxes.size());
+
+        if (config_.runtime.saveVisualization) {
+            saveLayoutVisualization(image, result.layoutResult, pageImage.pageIndex);
+        }
     }
 
     // Step 2: Process each layout category
@@ -282,7 +345,9 @@ PageResult DocPipeline::processPage(const PageImage& pageImage) {
 
     // Formula: save crop as image (matches Python — no LaTeX, just image fallback)
     // Python renders formulas as ![]() even with formulanet enabled
-    saveFormulaImages(image, equationBoxes, pageImage.pageIndex, result.elements);
+    if (config_.stages.enableFormula) {
+        saveFormulaImages(image, equationBoxes, pageImage.pageIndex, result.elements);
+    }
 
     // Handle truly unsupported elements (non-formula)
     auto skipElements = handleUnsupportedElements(unsupportedBoxes);
@@ -559,6 +624,63 @@ void DocPipeline::saveFormulaImages(
         elem.pageIndex = pageIndex;
         elements.push_back(elem);
     }
+}
+
+void DocPipeline::saveLayoutVisualization(
+    const cv::Mat& image,
+    const LayoutResult& layoutResult,
+    int pageIndex)
+{
+    if (image.empty()) {
+        return;
+    }
+
+    cv::Mat vis = image.clone();
+    for (const auto& box : layoutResult.boxes) {
+        cv::Rect rect = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
+        if (rect.width <= 0 || rect.height <= 0) {
+            continue;
+        }
+
+        const cv::Scalar color(
+            (37 * (box.clsId + 3)) % 255,
+            (67 * (box.clsId + 5)) % 255,
+            (97 * (box.clsId + 7)) % 255
+        );
+
+        cv::rectangle(vis, rect, color, 2);
+
+        std::ostringstream label;
+        label << (box.label.empty() ? layoutCategoryToString(box.category) : box.label)
+              << " " << std::fixed << std::setprecision(2) << box.confidence;
+        const std::string text = label.str();
+
+        int baseline = 0;
+        cv::Size textSize = cv::getTextSize(
+            text, cv::FONT_HERSHEY_SIMPLEX, 0.45, 1, &baseline);
+        cv::Rect textBg(
+            rect.x,
+            std::max(0, rect.y - textSize.height - 8),
+            std::min(image.cols - rect.x, textSize.width + 8),
+            textSize.height + 8);
+
+        cv::rectangle(vis, textBg, color, cv::FILLED);
+        cv::putText(
+            vis,
+            text,
+            cv::Point(textBg.x + 4, textBg.y + textBg.height - 4),
+            cv::FONT_HERSHEY_SIMPLEX,
+            0.45,
+            cv::Scalar(255, 255, 255),
+            1,
+            cv::LINE_AA);
+    }
+
+    std::ostringstream filename;
+    filename << "layout/page_" << std::setw(4) << std::setfill('0') << pageIndex << "_layout.png";
+    const std::string filepath = config_.runtime.outputDir + "/" + filename.str();
+    std::filesystem::create_directories(std::filesystem::path(filepath).parent_path());
+    cv::imwrite(filepath, vis);
 }
 
 void DocPipeline::reportProgress(const std::string& stage, int current, int total) {

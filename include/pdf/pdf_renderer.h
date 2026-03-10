@@ -24,6 +24,8 @@ namespace rapid_doc {
 struct PdfRenderConfig {
     int dpi = 200;                  // Rendering resolution
     int maxPages = 0;               // Max pages to render (0 = all)
+    int startPageId = 0;            // Inclusive start page (0-based)
+    int endPageId = -1;             // Inclusive end page (-1 = all)
     int maxConcurrentRenders = 4;   // Parallel rendering limit
     int maxDpi = 300;               // Safety limit
     size_t maxPixelsPerPage = 25000000; // 25M pixels safety limit

@@ -5,7 +5,6 @@
  * @brief Pipeline configuration for RapidDoc C++
  * 
  * Controls which stages are enabled, model paths, and runtime parameters.
- * Stages that DEEPX NPU does not support are disabled by default.
  */
 
 #include <string>
@@ -34,8 +33,8 @@ struct ModelPaths {
 /**
  * @brief Pipeline stage enable/disable switches
  * 
- * NOTE: Stages marked [NPU_UNSUPPORTED] are disabled by default.
- * They have interface stubs for future enablement when NPU support is added.
+ * NOTE: Wireless table and table classification remain unsupported.
+ * Formula regions are exposed as image fallbacks rather than LaTeX output.
  */
 struct PipelineStages {
     bool enablePdfRender = true;        // PDF → page images
@@ -45,8 +44,7 @@ struct PipelineStages {
     bool enableReadingOrder = true;     // XY-Cut reading order sort
     bool enableMarkdownOutput = true;   // Generate Markdown output
 
-    // [NPU_UNSUPPORTED] — disabled by default, stubs only
-    bool enableFormula = false;         // Formula/equation recognition
+    bool enableFormula = true;          // Formula/equation image fallback
     bool enableWirelessTable = false;   // Wireless table recognition (SLANet)
     bool enableTableClassify = false;   // Table type classification
 };
@@ -57,6 +55,8 @@ struct PipelineStages {
 struct RuntimeConfig {
     int pdfDpi = 200;                   // PDF rendering DPI
     int maxPages = 0;                   // Max pages to process (0 = all)
+    int startPageId = 0;                // Inclusive start page (0-based)
+    int endPageId = -1;                 // Inclusive end page (-1 = all)
     int maxConcurrentPages = 4;         // Parallel PDF rendering limit
     
     // Layout detection

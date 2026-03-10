@@ -30,10 +30,12 @@ void printUsage(const char* programName) {
     std::cout << "  -h, --help            Show this help\n";
     std::cout << "\n";
     std::cout << "API Endpoints:\n";
-    std::cout << "  POST /process         - Process uploaded PDF (multipart/form-data)\n";
-    std::cout << "  POST /process/base64  - Process base64 encoded PDF\n";
-    std::cout << "  GET  /health          - Health check\n";
-    std::cout << "  GET  /status          - Server statistics\n";
+    std::cout << "  POST /file_parse        - Python RapidDoc-compatible batch parse API\n";
+    std::cout << "  POST /v1/images:annotate- Vision API-compatible image annotation\n";
+    std::cout << "  POST /process           - Legacy single-file PDF processing\n";
+    std::cout << "  POST /process/base64    - Legacy base64 PDF processing\n";
+    std::cout << "  GET  /health            - Health check\n";
+    std::cout << "  GET  /status            - Server statistics\n";
 }
 
 int main(int argc, char* argv[]) {

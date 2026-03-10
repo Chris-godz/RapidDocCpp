@@ -63,7 +63,7 @@ void PipelineConfig::show() const {
     LOG_INFO("  Wired Table:      {}", stages.enableWiredTable ? "ON" : "OFF");
     LOG_INFO("  Reading Order:    {}", stages.enableReadingOrder ? "ON" : "OFF");
     LOG_INFO("  Markdown Output:  {}", stages.enableMarkdownOutput ? "ON" : "OFF");
-    LOG_INFO("  Formula (NPU N/A):{}", stages.enableFormula ? "ON" : "OFF");
+    LOG_INFO("  Formula Fallback: {}", stages.enableFormula ? "ON" : "OFF");
     LOG_INFO("  Wireless Table:   {}", stages.enableWirelessTable ? "ON" : "OFF");
     LOG_INFO("  Table Classify:   {}", stages.enableTableClassify ? "ON" : "OFF");
     LOG_INFO("Models:");
@@ -74,6 +74,8 @@ void PipelineConfig::show() const {
     LOG_INFO("Runtime:");
     LOG_INFO("  PDF DPI:          {}", runtime.pdfDpi);
     LOG_INFO("  Max pages:        {}", runtime.maxPages);
+    LOG_INFO("  Start page:       {}", runtime.startPageId);
+    LOG_INFO("  End page:         {}", runtime.endPageId);
     LOG_INFO("  Output dir:       {}", runtime.outputDir);
     LOG_INFO("========================================");
 }

@@ -51,7 +51,7 @@ download_and_extract() {
     curl -fSL "$url" -o "$DOWNLOAD_DIR/$name"
     rm -rf "$dest"
     mkdir -p "$dest"
-    tar xzf "$DOWNLOAD_DIR/$name" -C "$dest" --strip-components=0
+    tar xzf "$DOWNLOAD_DIR/$name" -C "$dest" --strip-components=1
     rm -f "$DOWNLOAD_DIR/$name"
     echo "  Extracted to $dest"
 }
