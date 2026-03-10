@@ -75,11 +75,33 @@ public:
 
 private:
     cv::Mat preprocess(const cv::Mat& image);
-    std::vector<TableCell> extractCells(const cv::Mat& mask, const cv::Size& originalSize);
+
+    // Line extraction (aligned with Python get_table_line + adjust/extend)
+    struct LineSeg { float x1, y1, x2, y2; };
+    std::vector<LineSeg> getTableLine(const cv::Mat& binImg, int axis, int lineW);
+    std::vector<LineSeg> adjustLines(const std::vector<LineSeg>& lines, float alph, float angle);
+    void finalAdjustLines(std::vector<LineSeg>& rowboxes, std::vector<LineSeg>& colboxes);
+    static LineSeg lineToLine(LineSeg pts1, const LineSeg& pts2, float alpha, float angle);
+
+    // Cell polygon extraction (aligned with Python cal_region_boxes + min_area_rect_box)
+    struct Polygon8 { float pts[8]; };
+    std::vector<Polygon8> extractCellPolygons(const cv::Mat& lineImg, int W, int H);
+
+    // TableRecover (aligned with Python table_recover.py)
+    struct LogicPoint { int rowStart, rowEnd, colStart, colEnd; };
+    void recoverTableStructure(
+        std::vector<Polygon8>& polygons,
+        std::vector<LogicPoint>& logicPoints,
+        float rowThresh = 10.0f, float colThresh = 15.0f);
+
+    // Full postprocess (dxengine path)
+    std::vector<TableCell> postprocessDxEngine(
+        const cv::Mat& img, const cv::Mat& pred,
+        float scale, int padTop, int padLeft, int origH, int origW);
 
     struct Impl;
-    std::unique_ptr<Impl> impl_;
     TableRecognizerConfig config_;
+    std::unique_ptr<Impl> impl_;
     bool initialized_ = false;
 };
 

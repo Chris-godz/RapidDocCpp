@@ -118,9 +118,10 @@ enum class TableType {
  * @brief Single table cell
  */
 struct TableCell {
-    int row, col;             // Cell position
-    int rowSpan, colSpan;     // Spans
-    float x0, y0, x1, y1;    // Cell bounding box
+    int row, col;             // Cell position (logical grid)
+    int rowSpan, colSpan;     // Spans (from TableRecover)
+    float x0, y0, x1, y1;    // Cell bounding box (axis-aligned)
+    float poly[8];            // 4-point polygon (x1,y1,x2,y2,x3,y3,x4,y4)
     std::string content;      // OCR text content
 };
 
