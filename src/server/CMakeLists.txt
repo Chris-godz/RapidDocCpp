@@ -1,5 +1,4 @@
-# HTTP Server
-
+# HTTP Server — Crow depends on standalone ASIO (asio.hpp, provided by parent)
 add_library(doc_server STATIC
     server.cpp
 )
@@ -7,8 +6,11 @@ add_library(doc_server STATIC
 target_include_directories(doc_server PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/3rd-party/crow/include
+    ${ASIO_INCLUDE_DIR}
     ${OpenCV_INCLUDE_DIRS}
 )
+target_compile_definitions(doc_server PUBLIC ASIO_STANDALONE)
+target_compile_definitions(doc_server PRIVATE PROJECT_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 
 target_link_libraries(doc_server
     doc_pipeline
@@ -23,6 +25,10 @@ add_executable(rapid_doc_server server_main.cpp)
 target_include_directories(rapid_doc_server PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/3rd-party/crow/include
+)
+
+target_compile_definitions(rapid_doc_server PRIVATE
+    PROJECT_ROOT_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(rapid_doc_server

@@ -14,12 +14,13 @@ if(NOT BUILD_OPENCV_FROM_SOURCE)
     endif()
 else()
     message(STATUS "Building OpenCV from source (submodule)")
+    set(_rapiddoc_saved_build_tests ${BUILD_TESTS})
 
     if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/opencv/CMakeLists.txt")
         message(FATAL_ERROR "OpenCV submodule not found. Run: git submodule update --init 3rd-party/opencv 3rd-party/opencv_contrib")
     endif()
 
-    # Set all OpenCV options BEFORE add_subdirectory
+    # Set all OpenCV options BEFORE add_subdirectory (OpenCV's BUILD_TESTS, not project's)
     set(BUILD_opencv_world OFF CACHE BOOL "" FORCE)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -63,9 +64,24 @@ else()
     set(WITH_TBB OFF CACHE BOOL "" FORCE)
     set(WITH_EIGEN OFF CACHE BOOL "" FORCE)
 
-    add_subdirectory(${CMAKE_SOURCE_DIR}/3rd-party/opencv ${CMAKE_BINARY_DIR}/opencv_build EXCLUDE_FROM_ALL)
+    # Do not use EXCLUDE_FROM_ALL so that opencv targets are built and linked by dependents (e.g. rapid_doc_cli)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/3rd-party/opencv ${CMAKE_BINARY_DIR}/opencv_build)
 
-    set(OpenCV_DIR "${CMAKE_BINARY_DIR}/opencv_build" CACHE PATH "OpenCV build dir" FORCE)
+    set(_ocv_build "${CMAKE_BINARY_DIR}/opencv_build")
+    # Ensure generated header exists (subproject build can leave it missing)
+    file(MAKE_DIRECTORY "${_ocv_build}/opencv2")
+    if(NOT EXISTS "${_ocv_build}/opencv2/opencv_modules.hpp")
+        file(WRITE "${_ocv_build}/opencv2/opencv_modules.hpp"
+            "/* fallback: built modules */\n#pragma once\n"
+            "#define HAVE_OPENCV_CORE\n#define HAVE_OPENCV_IMGPROC\n"
+            "#define HAVE_OPENCV_IMGCODECS\n#define HAVE_OPENCV_HIGHGUI\n#define HAVE_OPENCV_FREETYPE\n")
+    endif()
+    # Avoid parallel make race: pre-create object dirs so .d files can be written (make -j)
+    file(MAKE_DIRECTORY "${_ocv_build}/modules/imgproc/CMakeFiles/opencv_imgproc.dir/src")
+    file(MAKE_DIRECTORY "${_ocv_build}/modules/core/CMakeFiles/opencv_core.dir/src")
+    file(MAKE_DIRECTORY "${_ocv_build}/3rdparty/libwebp")
+
+    set(OpenCV_DIR "${_ocv_build}" CACHE PATH "OpenCV build dir" FORCE)
 
     set(OpenCV_INCLUDE_DIRS
         "${CMAKE_BINARY_DIR}"
@@ -81,6 +97,14 @@ else()
 
     set(OpenCV_LIBS opencv_core opencv_imgproc opencv_imgcodecs opencv_highgui opencv_freetype
         CACHE INTERNAL "OpenCV libraries")
+
+    # Single interface target so executables (rapid_doc_cli, tests) get correct link order and deps
+    add_library(rapiddoc_opencv_libs INTERFACE)
+    target_link_libraries(rapiddoc_opencv_libs INTERFACE
+        opencv_core opencv_imgproc opencv_imgcodecs opencv_highgui opencv_freetype)
+
+    # Restore project's BUILD_TESTS so test targets are still built when -DBUILD_TESTS=ON
+    set(BUILD_TESTS ${_rapiddoc_saved_build_tests} CACHE BOOL "Build unit tests" FORCE)
 
     message(STATUS "✓ OpenCV will be built from source")
     message(STATUS "  Modules: ${BUILD_LIST}")

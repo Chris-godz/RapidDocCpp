@@ -25,8 +25,8 @@ struct PdfRenderer::Impl {
 };
 
 PdfRenderer::PdfRenderer(const PdfRenderConfig& config)
-    : config_(config)
-    , impl_(std::make_unique<Impl>())
+    : impl_(std::make_unique<Impl>())
+    , config_(config)
 {}
 
 PdfRenderer::~PdfRenderer() = default;

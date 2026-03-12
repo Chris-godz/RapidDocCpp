@@ -1,2 +1,3 @@
-gradio>=5.0.0
+# Pin to Gradio 5.x: 6.x removed Textbox(show_copy_button) and moved theme/css to launch()
+gradio>=5.0.0,<6.0.0
 requests>=2.31.0

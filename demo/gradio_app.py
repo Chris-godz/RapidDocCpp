@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import inspect
 import mimetypes
 import os
 import re
 import socket
+import warnings
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
@@ -25,6 +27,9 @@ import gradio as gr
 import requests
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# Gradio 6.0+ moves theme/css from Blocks() to launch(); older versions only support Blocks().
+_LAUNCH_KWARGS = inspect.signature(gr.Blocks.launch).parameters
+LAUNCH_SUPPORTS_THEME = "theme" in _LAUNCH_KWARGS and "css" in _LAUNCH_KWARGS
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "demo" / "output-gradio"
@@ -269,7 +274,8 @@ async def _set_language_cookie(request, call_next):
     return response
 
 
-def create_ui():
+def create_ui(*, theme_css_in_blocks: bool = True):
+    """Build Gradio UI. If theme_css_in_blocks is False, theme/css are passed to launch() instead (Gradio 6+)."""
     custom_css = """
     #md-preview,
     #md-preview > div {
@@ -291,12 +297,12 @@ def create_ui():
         height: auto;
     }
     """
+    blocks_kwargs = {"title": "RapidDocCpp - C++ Backend"}
+    if theme_css_in_blocks:
+        blocks_kwargs["theme"] = gr.themes.Soft()
+        blocks_kwargs["css"] = custom_css
 
-    with gr.Blocks(
-        title="RapidDocCpp - C++ Backend",
-        theme=gr.themes.Soft(),
-        css=custom_css,
-    ) as demo:
+    with gr.Blocks(**blocks_kwargs) as demo:
         with gr.Row():
             with gr.Column(scale=2):
                 gr.Markdown(
@@ -467,7 +473,7 @@ def create_ui():
             outputs=[perf_display],
         )
 
-    return demo
+    return demo, custom_css
 
 
 if __name__ == "__main__":
@@ -486,12 +492,37 @@ if __name__ == "__main__":
         print(f"RapidDocCpp Gradio UI LAN URL: http://{lan_ip}:{args.port}")
     print(f"RapidDocCpp C++ API server: {SERVER_URL}")
 
-    demo = create_ui()
+    if LAUNCH_SUPPORTS_THEME:
+        demo, custom_css = create_ui(theme_css_in_blocks=False)
+        launch_kwargs = {
+            "server_name": bind_host,
+            "server_port": args.port,
+            "share": False,
+            "show_error": True,
+            "allowed_paths": [str(DEFAULT_OUTPUT_DIR), str(DEFAULT_OUTPUT_DIR.resolve())],
+            "theme": gr.themes.Soft(),
+            "css": custom_css,
+        }
+    else:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*'theme' parameter in the Blocks constructor.*",
+                category=DeprecationWarning,
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message=".*'css' parameter in the Blocks constructor.*",
+                category=DeprecationWarning,
+            )
+            demo, custom_css = create_ui(theme_css_in_blocks=True)
+        launch_kwargs = {
+            "server_name": bind_host,
+            "server_port": args.port,
+            "share": False,
+            "show_error": True,
+            "allowed_paths": [str(DEFAULT_OUTPUT_DIR), str(DEFAULT_OUTPUT_DIR.resolve())],
+        }
+
     demo.app.add_middleware(BaseHTTPMiddleware, dispatch=_set_language_cookie)
-    demo.launch(
-        server_name=bind_host,
-        server_port=args.port,
-        share=False,
-        show_error=True,
-        allowed_paths=[str(DEFAULT_OUTPUT_DIR), str(DEFAULT_OUTPUT_DIR.resolve())],
-    )
+    demo.launch(**launch_kwargs)

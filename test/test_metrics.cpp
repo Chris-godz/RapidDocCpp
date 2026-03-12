@@ -6,16 +6,16 @@ using namespace rapid_doc;
 using namespace rapid_doc::test_metrics;
 
 TEST(MetricsTest, IoU_ExactMatch) {
-    LayoutBox box1 = {10.0f, 10.0f, 100.0f, 100.0f, LayoutCategory::TEXT, 1.0f, 0};
-    LayoutBox box2 = {10.0f, 10.0f, 100.0f, 100.0f, LayoutCategory::TEXT, 1.0f, 0};
+    LayoutBox box1 = {10.0f, 10.0f, 100.0f, 100.0f, LayoutCategory::TEXT, 1.0f, 0, -1, {}};
+    LayoutBox box2 = {10.0f, 10.0f, 100.0f, 100.0f, LayoutCategory::TEXT, 1.0f, 0, -1, {}};
 
     float iou = calculateIoU(box1, box2);
     EXPECT_FLOAT_EQ(iou, 1.0f);
 }
 
 TEST(MetricsTest, IoU_NoOverlap) {
-    LayoutBox box1 = {10.0f, 10.0f, 50.0f, 50.0f, LayoutCategory::TEXT, 1.0f, 0};
-    LayoutBox box2 = {60.0f, 60.0f, 100.0f, 100.0f, LayoutCategory::TEXT, 1.0f, 0};
+    LayoutBox box1 = {10.0f, 10.0f, 50.0f, 50.0f, LayoutCategory::TEXT, 1.0f, 0, -1, {}};
+    LayoutBox box2 = {60.0f, 60.0f, 100.0f, 100.0f, LayoutCategory::TEXT, 1.0f, 0, -1, {}};
 
     float iou = calculateIoU(box1, box2);
     EXPECT_FLOAT_EQ(iou, 0.0f);
@@ -23,12 +23,12 @@ TEST(MetricsTest, IoU_NoOverlap) {
 
 TEST(MetricsTest, IoU_PartialOverlap) {
     // 10x10 to 30x30, area = 400
-    LayoutBox box1 = {10.0f, 10.0f, 30.0f, 30.0f, LayoutCategory::TEXT, 1.0f, 0};
+    LayoutBox box1 = {10.0f, 10.0f, 30.0f, 30.0f, LayoutCategory::TEXT, 1.0f, 0, -1, {}};
     // 20x20 to 40x40, area = 400
     // Intersection: 20x20 to 30x30, area = 100
     // Union: 400 + 400 - 100 = 700
     // IoU: 100 / 700 = 1/7 = 0.142857
-    LayoutBox box2 = {20.0f, 20.0f, 40.0f, 40.0f, LayoutCategory::TEXT, 1.0f, 0};
+    LayoutBox box2 = {20.0f, 20.0f, 40.0f, 40.0f, LayoutCategory::TEXT, 1.0f, 0, -1, {}};
 
     float iou = calculateIoU(box1, box2);
     EXPECT_NEAR(iou, 0.142857f, 1e-4);

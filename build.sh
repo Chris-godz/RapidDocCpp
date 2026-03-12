@@ -54,6 +54,14 @@ echo "✅ Build complete: ${BUILD_DIR}/bin"
 
 # Run tests if enabled
 if [ "$BUILD_TESTS" = true ]; then
+    # Inject set_env before any gtest run so child processes (rapiddoc_tests, rapiddoc_cross_tests) inherit env
+    if [ -f "../set_env.sh" ]; then
+        echo "Sourcing set_env.sh for test run (1 2 1 3 2 4)..."
+        set +e
+        # shellcheck source=../set_env.sh
+        . "../set_env.sh" 1 2 1 3 2 4
+        set -e
+    fi
     echo ""
     echo "========================================="
     echo "Running unit tests..."

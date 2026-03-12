@@ -154,8 +154,8 @@ struct LayoutDetector::Impl {
 // Constructor / Destructor
 // ---------------------------------------------------------------------------
 LayoutDetector::LayoutDetector(const LayoutDetectorConfig& config)
-    : config_(config)
-    , impl_(std::make_unique<Impl>())
+    : impl_(std::make_unique<Impl>())
+    , config_(config)
 {
 }
 

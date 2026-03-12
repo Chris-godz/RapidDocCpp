@@ -41,7 +41,7 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 # ========================================
 include(dx_func)
 
-add_definitions(-DPROJECT_ROOT_DIR="${CMAKE_SOURCE_DIR}")
+# PROJECT_ROOT_DIR is set per-target (app, server, test) to avoid redefinition with DXNN-OCR-cpp
 add_compile_options(-W -Wall -pthread -fPIC)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
@@ -75,6 +75,8 @@ include(cmake/FindONNXRuntime.cmake)
 # ========================================
 add_subdirectory(3rd-party/json)
 add_subdirectory(3rd-party/spdlog)
+# Pre-create object dirs to avoid parallel make race (opening dependency file ... No such file or directory)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/spdlog/CMakeFiles/spdlog.dir/src")
 
 # Suppress warnings from 3rd-party libraries
 set(CMAKE_CXX_FLAGS_BACKUP "${CMAKE_CXX_FLAGS}")
@@ -83,6 +85,9 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
 set(CLIPPER2_TESTS OFF CACHE BOOL "" FORCE)
 set(CLIPPER2_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(3rd-party/clipper2/CPP)
+# Pre-create object dirs for Clipper2 utils (parallel make race)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/clipper2/CPP/CMakeFiles/Clipper2utils.dir/Utils")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/clipper2/CPP/CMakeFiles/Clipper2Zutils.dir/Utils")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_BACKUP}")
 
@@ -92,13 +97,17 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_BACKUP}")
 set(DXNN_OCR_AS_SUBPROJECT ON CACHE BOOL "" FORCE)
 if(EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/CMakeLists.txt"
    AND EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/src/pipeline/ocr_pipeline.cpp")
-    # Share parent OpenCV and disable sub-project extras
-    set(BUILD_OPENCV_FROM_SOURCE OFF CACHE BOOL "" FORCE)
+    # DXNN uses parent's OpenCV (from source or system) via its BuildOpenCV when DXNN_OCR_AS_SUBPROJECT
     set(DXOCR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(BUILD_OCR_SERVER OFF CACHE BOOL "" FORCE)
     set(BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
     add_subdirectory(3rd-party/DXNN-OCR-cpp)
     set(HAS_DXNN_OCR ON)
+    # Pre-create object dirs to avoid parallel make race (opening dependency file ... No such file or directory)
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/DXNN-OCR-cpp/src/detection/CMakeFiles/ocr_detection.dir")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/DXNN-OCR-cpp/src/recognition/CMakeFiles/ocr_recognition.dir")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/DXNN-OCR-cpp/src/classification/CMakeFiles/ocr_classification.dir")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/DXNN-OCR-cpp/src/preprocessing/CMakeFiles/ocr_preprocessing.dir")
 else()
     message(WARNING "DXNN-OCR-cpp submodule not initialized — skipping OCR pipeline")
     set(HAS_DXNN_OCR OFF)
@@ -147,11 +156,37 @@ else()
 endif()
 
 # ========================================
-# Server (HTTP API)
+# Server (HTTP API) — Crow needs standalone ASIO
 # ========================================
 if(BUILD_SERVER AND HAS_DXNN_OCR)
     message(STATUS "Building HTTP API server")
+    # 1) Prefer local 3rd-party/asio (submodule or manual clone) to avoid build-time network
+    if(EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/asio/asio/include/asio.hpp")
+        set(ASIO_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/3rd-party/asio/asio/include)
+        message(STATUS "Using ASIO from 3rd-party/asio")
+    # 2) Fallback: system Asio (e.g. libasio-dev), avoids FetchContent when network fails
+    else()
+        find_path(ASIO_SYSTEM_INCLUDE asio.hpp
+            PATHS /usr/include /usr/local/include
+            PATH_SUFFIXES asio
+            NO_DEFAULT_PATH)
+        if(ASIO_SYSTEM_INCLUDE)
+            set(ASIO_INCLUDE_DIR "${ASIO_SYSTEM_INCLUDE}")
+            message(STATUS "Using ASIO from system: ${ASIO_INCLUDE_DIR}")
+        endif()
+    endif()
+    # 3) Fetch from GitHub only if no local/system Asio (fails when TLS/network unavailable)
+    if(NOT ASIO_INCLUDE_DIR)
+        include(FetchContent)
+        FetchContent_Declare(asio
+            GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+            GIT_TAG        asio-1-30-0
+        )
+        FetchContent_Populate(asio)
+        set(ASIO_INCLUDE_DIR ${asio_SOURCE_DIR}/asio/include)
+    endif()
     add_subdirectory(src/server)
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/src/server/CMakeFiles/doc_server.dir")
 else()
     message(STATUS "Skipping Server (requires DXNN-OCR-cpp)")
 endif()

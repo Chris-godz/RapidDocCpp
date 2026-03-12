@@ -64,14 +64,11 @@ inline void saveMatAsNpy(const std::string& path, const cv::Mat& mat) {
         throw std::runtime_error("dump_utils: cannot open " + path);
 
     std::string dtype;
-    size_t elem_bytes;
     int depth = mat.depth();
     if (depth == CV_32F) {
         dtype = "<f4";
-        elem_bytes = 4;
     } else if (depth == CV_8U) {
         dtype = "|u1";
-        elem_bytes = 1;
     } else {
         throw std::runtime_error("dump_utils: unsupported mat depth " + std::to_string(depth));
     }

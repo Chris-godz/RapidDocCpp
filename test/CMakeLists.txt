@@ -58,12 +58,17 @@ target_compile_definitions(rapiddoc_cross_tests PRIVATE
     PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}"
 )
 
+if(TARGET rapiddoc_opencv_libs)
+    set(_test_ocv_libs rapiddoc_opencv_libs)
+else()
+    set(_test_ocv_libs ${OpenCV_LIBS})
+endif()
 target_link_libraries(rapiddoc_cross_tests PRIVATE
     gtest_main
     test_utils
     doc_layout
     doc_table
-    ${OpenCV_LIBS}
+    ${_test_ocv_libs}
 )
 
 # Link ONNX Runtime if available (used by layout postprocess test)
@@ -94,10 +99,15 @@ if(HAS_DXNN_OCR)
         PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}"
     )
 
+    if(TARGET rapiddoc_opencv_libs)
+        set(_e2e_ocv_libs rapiddoc_opencv_libs)
+    else()
+        set(_e2e_ocv_libs ${OpenCV_LIBS})
+    endif()
     target_link_libraries(rapiddoc_e2e_tests PRIVATE
         gtest_main
         doc_pipeline
-        ${OpenCV_LIBS}
+        ${_e2e_ocv_libs}
     )
 
     add_test(NAME E2ETests COMMAND rapiddoc_e2e_tests)
@@ -118,8 +128,13 @@ if(HAS_DXNN_OCR)
         PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}"
     )
 
+    if(TARGET rapiddoc_opencv_libs)
+        set(_run_e2e_ocv_libs rapiddoc_opencv_libs)
+    else()
+        set(_run_e2e_ocv_libs ${OpenCV_LIBS})
+    endif()
     target_link_libraries(run_cpp_e2e PRIVATE
         doc_pipeline
-        ${OpenCV_LIBS}
+        ${_run_e2e_ocv_libs}
     )
 endif()
