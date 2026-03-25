@@ -31,8 +31,14 @@
 #include <memory>
 #include <functional>
 #include <vector>
+#include <atomic>
+#include <chrono>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace rapid_doc {
+
+class DocPipelineTestAccess;
 
 /**
  * @brief Progress callback for pipeline stages
@@ -109,10 +115,18 @@ public:
     void setMaxPages(int maxPages) { config_.runtime.maxPages = maxPages; }
 
 private:
+    friend class DocPipelineTestAccess;
+
     /**
      * @brief Process a single page through the pipeline
      */
     PageResult processPage(const PageImage& pageImage);
+
+    using OcrSubmitHook = std::function<bool(const cv::Mat&, int64_t)>;
+    using OcrFetchHook = std::function<bool(
+        std::vector<ocr::PipelineOCRResult>&, int64_t&, bool&)>;
+    using TableRecognizeHook = std::function<TableResult(const cv::Mat&)>;
+    using TableHtmlHook = std::function<std::string(const std::vector<TableCell>&)>;
 
     /**
      * @brief Run OCR on text regions detected by layout
@@ -122,7 +136,8 @@ private:
      */
     std::vector<ContentElement> runOcrOnRegions(
         const cv::Mat& image,
-        const std::vector<LayoutBox>& textBoxes
+        const std::vector<LayoutBox>& textBoxes,
+        int pageIndex
     );
 
     /**
@@ -133,7 +148,8 @@ private:
      */
     std::vector<ContentElement> runTableRecognition(
         const cv::Mat& image,
-        const std::vector<LayoutBox>& tableBoxes
+        const std::vector<LayoutBox>& tableBoxes,
+        int pageIndex
     );
 
     /**
@@ -141,7 +157,8 @@ private:
      * Creates placeholder ContentElements
      */
     std::vector<ContentElement> handleUnsupportedElements(
-        const std::vector<LayoutBox>& unsupportedBoxes
+        const std::vector<LayoutBox>& unsupportedBoxes,
+        int pageIndex
     );
 
     /**
@@ -174,6 +191,24 @@ private:
      * @return Recognized text (empty on failure)
      */
     std::string ocrOnCrop(const cv::Mat& crop, int64_t taskId);
+    bool submitOcrTask(const cv::Mat& crop, int64_t taskId);
+    bool fetchOcrResult(
+        std::vector<ocr::PipelineOCRResult>& results,
+        int64_t& resultId,
+        bool& success);
+    bool waitForOcrResult(
+        int64_t taskId,
+        std::vector<ocr::PipelineOCRResult>& results,
+        bool& success);
+    int64_t allocateOcrTaskId();
+
+    TableResult recognizeTable(const cv::Mat& tableCrop);
+    std::string generateTableHtml(const std::vector<TableCell>& cells);
+    ContentElement makeTableFallbackElement(
+        const LayoutBox& box,
+        int pageIndex,
+        const std::string& reason) const;
+    static std::string tableFallbackMessage(const std::string& reason);
 
     void reportProgress(const std::string& stage, int current, int total);
 
@@ -185,6 +220,20 @@ private:
     std::unique_ptr<LayoutDetector> layoutDetector_;
     std::unique_ptr<TableRecognizer> tableRecognizer_;
     std::unique_ptr<ocr::OCRPipeline> ocrPipeline_;
+
+    OcrSubmitHook ocrSubmitHook_;
+    OcrFetchHook ocrFetchHook_;
+    TableRecognizeHook tableRecognizeHook_;
+    TableHtmlHook tableHtmlHook_;
+
+    struct BufferedOcrResult {
+        std::vector<ocr::PipelineOCRResult> results;
+        bool success = false;
+    };
+    std::unordered_map<int64_t, BufferedOcrResult> bufferedOcrResults_;
+    std::unordered_set<int64_t> timedOutOcrTaskIds_;
+    std::chrono::milliseconds ocrWaitTimeout_{30000};
+    std::atomic<int64_t> nextOcrTaskId_{1};
 
     // Output writers
     MarkdownWriter markdownWriter_;

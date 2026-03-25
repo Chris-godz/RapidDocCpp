@@ -84,6 +84,93 @@ add_test(NAME CrossValidationTests COMMAND rapiddoc_cross_tests)
 # End-to-End Pipeline Tests
 # ========================================
 if(HAS_DXNN_OCR)
+    add_executable(rapiddoc_contract_tests
+        test_phase1_contracts.cpp
+    )
+
+    target_include_directories(rapiddoc_contract_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/3rd-party/json/include
+        ${PROJECT_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/include
+    )
+
+    target_compile_definitions(rapiddoc_contract_tests PRIVATE
+        PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}"
+    )
+
+    if(TARGET rapiddoc_opencv_libs)
+        set(_contract_ocv_libs rapiddoc_opencv_libs)
+    else()
+        set(_contract_ocv_libs ${OpenCV_LIBS})
+    endif()
+    target_link_libraries(rapiddoc_contract_tests PRIVATE
+        gtest_main
+        doc_pipeline
+        ${_contract_ocv_libs}
+    )
+
+    add_test(NAME Phase1ContractTests COMMAND rapiddoc_contract_tests)
+
+    if(TARGET doc_server)
+        add_executable(rapid_doc_test_server
+            http_test_server_main.cpp
+        )
+
+        target_include_directories(rapid_doc_test_server PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/3rd-party/json/include
+            ${PROJECT_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/include
+        )
+
+        target_compile_definitions(rapid_doc_test_server PRIVATE
+            PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}"
+        )
+
+        target_link_libraries(rapid_doc_test_server PRIVATE
+            doc_server
+            doc_pipeline
+            spdlog::spdlog
+        )
+
+        set_target_properties(rapid_doc_test_server PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        )
+
+        add_executable(rapiddoc_integration_tests
+            test_phase1_integration.cpp
+            test_phase1_http_integration.cpp
+        )
+
+        target_include_directories(rapiddoc_integration_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/3rd-party/json/include
+            ${PROJECT_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/include
+        )
+
+        target_compile_definitions(rapiddoc_integration_tests PRIVATE
+            PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}"
+            RAPIDDOC_BUILD_DIR="${PROJECT_BINARY_DIR}"
+        )
+
+        if(TARGET rapiddoc_opencv_libs)
+            set(_integration_ocv_libs rapiddoc_opencv_libs)
+        else()
+            set(_integration_ocv_libs ${OpenCV_LIBS})
+        endif()
+        target_link_libraries(rapiddoc_integration_tests PRIVATE
+            gtest_main
+            doc_pipeline
+            doc_server
+            ${_integration_ocv_libs}
+        )
+        add_dependencies(rapiddoc_integration_tests rapid_doc_test_server)
+
+        add_test(NAME Phase1IntegrationTests COMMAND rapiddoc_integration_tests)
+    endif()
+
     add_executable(rapiddoc_e2e_tests
         test_e2e_pipeline.cpp
     )

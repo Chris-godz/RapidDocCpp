@@ -17,6 +17,8 @@
 
 namespace rapid_doc {
 
+class DocServerTestAccess;
+
 /**
  * @brief HTTP server configuration
  */
@@ -64,6 +66,8 @@ public:
     bool isRunning() const { return running_.load(); }
 
 private:
+    friend class DocServerTestAccess;
+
     ServerConfig config_;
     std::unique_ptr<DocPipeline> pipeline_;
     std::atomic<bool> running_{false};

@@ -21,6 +21,7 @@
 #include <numeric>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <tuple>
 
 namespace rapid_doc {
@@ -630,58 +631,76 @@ std::vector<TableCell> TableRecognizer::postprocessDxEngine(
 // ============================================================================
 // generateHtml — aligned with Python plot_html_table
 // ============================================================================
+namespace {
+std::string escapeHtml(const std::string& text) {
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (char ch : text) {
+        switch (ch) {
+            case '&': escaped += "&amp;"; break;
+            case '<': escaped += "&lt;"; break;
+            case '>': escaped += "&gt;"; break;
+            case '"': escaped += "&quot;"; break;
+            default: escaped.push_back(ch); break;
+        }
+    }
+    return escaped;
+}
+} // namespace
+
 std::string TableRecognizer::generateHtml(const std::vector<TableCell>& cells) {
     if (cells.empty()) return "";
 
-    // Build logic points grid
-    int maxRow = 0, maxCol = 0;
-    for (auto& c : cells) {
+    int maxRow = 0;
+    int maxCol = 0;
+    for (const auto& c : cells) {
+        if (c.row < 0 || c.col < 0 || c.rowSpan <= 0 || c.colSpan <= 0) {
+            throw std::runtime_error("invalid table cell span or index");
+        }
         maxRow = std::max(maxRow, c.row + c.rowSpan);
         maxCol = std::max(maxCol, c.col + c.colSpan);
     }
 
-    // Grid: each cell stores (cellIndex, rowStart, rowEnd, colStart, colEnd)
-    struct GridEntry { int idx, rs, re, cs, ce; };
-    std::vector<std::vector<GridEntry*>> grid(maxRow, std::vector<GridEntry*>(maxCol, nullptr));
-    std::vector<GridEntry> entries(cells.size());
-    for (int i = 0; i < (int)cells.size(); ++i) {
-        entries[i] = {i, cells[i].row, cells[i].row + cells[i].rowSpan - 1,
-                      cells[i].col, cells[i].col + cells[i].colSpan - 1};
-        for (int r = entries[i].rs; r <= entries[i].re && r < maxRow; ++r)
-            for (int c = entries[i].cs; c <= entries[i].ce && c < maxCol; ++c)
-                grid[r][c] = &entries[i];
+    if (maxRow <= 0 || maxCol <= 0) {
+        throw std::runtime_error("invalid table dimensions");
     }
 
-    // Find valid bounds (rows/cols with content)
-    int validStartRow = maxRow, validStartCol = maxCol, validEndCol = 0;
-    for (int i = 0; i < (int)cells.size(); ++i) {
-        if (!cells[i].content.empty()) {
-            validStartRow = std::min(validStartRow, cells[i].row);
-            validStartCol = std::min(validStartCol, cells[i].col);
-            validEndCol = std::max(validEndCol, cells[i].col + cells[i].colSpan - 1);
+    // Occupancy matrix: each slot stores the owning cell index.
+    std::vector<std::vector<int>> occupancy(maxRow, std::vector<int>(maxCol, -1));
+    for (int i = 0; i < static_cast<int>(cells.size()); ++i) {
+        const auto& c = cells[i];
+        for (int r = c.row; r < c.row + c.rowSpan; ++r) {
+            for (int col = c.col; col < c.col + c.colSpan; ++col) {
+                if (occupancy[r][col] != -1) {
+                    throw std::runtime_error("overlapping table spans detected");
+                }
+                occupancy[r][col] = i;
+            }
         }
     }
-    if (validStartRow >= maxRow) { validStartRow = 0; validStartCol = 0; validEndCol = maxCol - 1; }
+
+    // Hole / ragged validation: every row must fully cover [0, maxCol).
+    for (int r = 0; r < maxRow; ++r) {
+        for (int c = 0; c < maxCol; ++c) {
+            if (occupancy[r][c] == -1) {
+                throw std::runtime_error("table structure has hole/ragged row width");
+            }
+        }
+    }
 
     std::string html = "<table border=\"1\">\n";
-    for (int r = validStartRow; r < maxRow; ++r) {
+    for (int r = 0; r < maxRow; ++r) {
         html += "  <tr>";
-        for (int c = validStartCol; c <= validEndCol; ++c) {
-            if (!grid[r][c]) {
-                html += "<td></td>";
-            } else {
-                auto* ge = grid[r][c];
-                // Only emit at the start cell
-                if (r == ge->rs && c == ge->cs) {
-                    int rs = ge->re - ge->rs + 1;
-                    int cs = ge->ce - ge->cs + 1;
-                    html += "<td";
-                    if (rs > 1) html += " rowspan=" + std::to_string(rs);
-                    if (cs > 1) html += " colspan=" + std::to_string(cs);
-                    html += ">";
-                    html += cells[ge->idx].content.empty() ? "" : cells[ge->idx].content;
-                    html += "</td>";
-                }
+        for (int c = 0; c < maxCol; ++c) {
+            const int cellIdx = occupancy[r][c];
+            const auto& cell = cells[cellIdx];
+            if (cell.row == r && cell.col == c) {
+                html += "<td";
+                if (cell.rowSpan > 1) html += " rowspan=" + std::to_string(cell.rowSpan);
+                if (cell.colSpan > 1) html += " colspan=" + std::to_string(cell.colSpan);
+                html += ">";
+                html += escapeHtml(cell.content);
+                html += "</td>";
             }
         }
         html += "</tr>\n";
@@ -695,7 +714,17 @@ std::string TableRecognizer::generateHtml(const std::vector<TableCell>& cells) {
 // ============================================================================
 TableResult TableRecognizer::recognize(const cv::Mat& tableImage) {
     TableResult result;
-    result.type = TableType::WIRED;
+    if (tableImage.empty()) {
+        result.type = TableType::UNKNOWN;
+        result.supported = false;
+        return result;
+    }
+
+    result.type = estimateTableType(tableImage);
+    if (result.type == TableType::WIRELESS) {
+        result.supported = false;
+        return result;
+    }
 
     if (!initialized_) {
         LOG_ERROR("Table recognizer not initialized");
@@ -731,7 +760,6 @@ TableResult TableRecognizer::recognize(const cv::Mat& tableImage) {
 
     // Full postprocess (aligned with Python)
     result.cells = postprocessDxEngine(tableImage, mask, scale, padTop, padLeft, origH, origW);
-    result.html = generateHtml(result.cells);
     result.supported = true;
 
     auto tEnd = std::chrono::steady_clock::now();

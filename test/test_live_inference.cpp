@@ -16,6 +16,7 @@
 #include "dump_utils.h"
 #include "metrics.h"
 #include <dxrt/inference_engine.h>
+#include <dxrt/exception/exception.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -26,6 +27,37 @@ static const std::string kProjectRoot = std::string(PROJECT_ROOT_DIR);
 static const std::string kTableFixDir = kProjectRoot + "/test/fixtures/table/";
 static const std::string kLayoutFixDir = kProjectRoot + "/test/fixtures/layout/";
 static const std::string kModelDir = kProjectRoot + "/engine/model_files/";
+
+namespace {
+
+const char* toDxrtErrorCodeString(dxrt::ERROR_CODE code) {
+    switch (code) {
+        case dxrt::ERROR_CODE::DEFAULT: return "DEFAULT";
+        case dxrt::ERROR_CODE::FILE_NOT_FOUND: return "FILE_NOT_FOUND";
+        case dxrt::ERROR_CODE::NULL_POINTER: return "NULL_POINTER";
+        case dxrt::ERROR_CODE::FILE_IO: return "FILE_IO";
+        case dxrt::ERROR_CODE::INVALID_ARGUMENT: return "INVALID_ARGUMENT";
+        case dxrt::ERROR_CODE::INVALID_OPERATION: return "INVALID_OPERATION";
+        case dxrt::ERROR_CODE::INVALID_MODEL: return "INVALID_MODEL";
+        case dxrt::ERROR_CODE::MODEL_PARSING: return "MODEL_PARSING";
+        case dxrt::ERROR_CODE::SERVICE_IO: return "SERVICE_IO";
+        case dxrt::ERROR_CODE::DEVICE_IO: return "DEVICE_IO";
+        default: return "UNKNOWN";
+    }
+}
+
+void classifyDxrtExceptionOrSkip(const dxrt::Exception& e, const std::string& where) {
+    const std::string detail = std::string("[") + where + "] DXRT exception code="
+                             + toDxrtErrorCodeString(e.code()) + ", what=" + e.what();
+    if (e.code() == dxrt::ERROR_CODE::SERVICE_IO ||
+        e.code() == dxrt::ERROR_CODE::DEVICE_IO) {
+        GTEST_SKIP() << detail << " (runtime/service issue; not a fixture regression)";
+    }
+
+    FAIL() << detail << " (fixture/model/code regression candidate)";
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Table UNet live inference → produces cpp_seg_mask.npy
@@ -47,21 +79,21 @@ protected:
 };
 
 TEST_F(TableLiveInferenceTest, RunUnetAndSaveMask) {
-    // Use Python's exact preprocessed data to ensure identical input
-    std::string prepPath = kTableFixDir + "preprocessed.npy";
-    if (!fs::exists(prepPath)) {
-        GTEST_SKIP() << "Table preprocessed.npy not found.";
-    }
-
-    NpyArray pyPrep = loadNpy(prepPath);
-    ASSERT_EQ(pyPrep.shape.size(), 4u);
-    int inputH = static_cast<int>(pyPrep.shape[1]);
-    int inputW = static_cast<int>(pyPrep.shape[2]);
-
-    cv::Mat rgb(inputH, inputW, CV_8UC3,
-                const_cast<uint8_t*>(pyPrep.asUint8()));
-
     try {
+        // Use Python's exact preprocessed data to ensure identical input
+        const std::string prepPath = kTableFixDir + "preprocessed.npy";
+        if (!fs::exists(prepPath)) {
+            GTEST_SKIP() << "Table preprocessed.npy not found.";
+        }
+
+        NpyArray pyPrep = loadNpy(prepPath);
+        ASSERT_EQ(pyPrep.shape.size(), 4u);
+        int inputH = static_cast<int>(pyPrep.shape[1]);
+        int inputW = static_cast<int>(pyPrep.shape[2]);
+
+        cv::Mat rgb(inputH, inputW, CV_8UC3,
+                    const_cast<uint8_t*>(pyPrep.asUint8()));
+
         dxrt::InferenceEngine engine(modelPath_);
         auto outputs = engine.Run(static_cast<void*>(rgb.data));
 
@@ -105,8 +137,12 @@ TEST_F(TableLiveInferenceTest, RunUnetAndSaveMask) {
             EXPECT_GE(accuracy, 0.99f)
                 << "Table seg mask pixel accuracy: " << accuracy;
         }
+    } catch (const dxrt::Exception& e) {
+        classifyDxrtExceptionOrSkip(e, "TableLiveInferenceTest.RunUnetAndSaveMask");
     } catch (const std::exception& e) {
-        GTEST_SKIP() << "DXRT engine failed: " << e.what();
+        FAIL() << "Unexpected std::exception: " << e.what();
+    } catch (...) {
+        FAIL() << "Unknown non-std exception in TableLiveInferenceTest.RunUnetAndSaveMask";
     }
 }
 
@@ -130,18 +166,23 @@ protected:
 };
 
 TEST_F(LayoutLiveInferenceTest, RunDxnnAndCompareOutputs) {
-    // Use Python's exact preprocessed data to isolate inference differences
-    NpyArray pyPrep = loadNpy(kLayoutFixDir + "preprocessed.npy");
-    ASSERT_EQ(pyPrep.shape.size(), 4u);
-    int inputH = static_cast<int>(pyPrep.shape[1]);
-    int inputW = static_cast<int>(pyPrep.shape[2]);
-    int inputC = static_cast<int>(pyPrep.shape[3]);
-    ASSERT_EQ(inputC, 3);
-
-    cv::Mat preprocessed(inputH, inputW, CV_8UC3,
-                         const_cast<uint8_t*>(pyPrep.asUint8()));
-
     try {
+        // Use Python's exact preprocessed data to isolate inference differences
+        const std::string prepPath = kLayoutFixDir + "preprocessed.npy";
+        if (!fs::exists(prepPath)) {
+            GTEST_SKIP() << "Layout preprocessed.npy not found.";
+        }
+
+        NpyArray pyPrep = loadNpy(prepPath);
+        ASSERT_EQ(pyPrep.shape.size(), 4u);
+        int inputH = static_cast<int>(pyPrep.shape[1]);
+        int inputW = static_cast<int>(pyPrep.shape[2]);
+        int inputC = static_cast<int>(pyPrep.shape[3]);
+        ASSERT_EQ(inputC, 3);
+
+        cv::Mat preprocessed(inputH, inputW, CV_8UC3,
+                             const_cast<uint8_t*>(pyPrep.asUint8()));
+
         dxrt::InferenceEngine engine(modelPath_);
         auto outputs = engine.Run(static_cast<void*>(preprocessed.data));
 
@@ -200,7 +241,11 @@ TEST_F(LayoutLiveInferenceTest, RunDxnnAndCompareOutputs) {
             EXPECT_GE(cosSim, 0.99f)
                 << "DXNN output " << i << " cosine similarity too low: " << cosSim;
         }
+    } catch (const dxrt::Exception& e) {
+        classifyDxrtExceptionOrSkip(e, "LayoutLiveInferenceTest.RunDxnnAndCompareOutputs");
     } catch (const std::exception& e) {
-        GTEST_SKIP() << "DXRT engine failed: " << e.what();
+        FAIL() << "Unexpected std::exception: " << e.what();
+    } catch (...) {
+        FAIL() << "Unknown non-std exception in LayoutLiveInferenceTest.RunDxnnAndCompareOutputs";
     }
 }

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -262,6 +263,14 @@ json makeEngineJson(bool tableEnabled, bool formulaEnabled) {
         {"formula", formulaEnabled ? "image_fallback" : "disabled"},
         {"table", tableEnabled ? "dxengine" : "disabled"},
     };
+}
+
+json getenvOrNull(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return nullptr;
+    }
+    return std::string(value);
 }
 
 json makeStatsJson(const DocumentResult& result) {
@@ -595,12 +604,12 @@ json buildFileResult(const ProcessedDocument& processed, const FileParseOptions&
 
 json buildHealthJson() {
     json envVars{
-        {"CUSTOM_INTER_OP_THREADS_COUNT", std::getenv("CUSTOM_INTER_OP_THREADS_COUNT")},
-        {"CUSTOM_INTRA_OP_THREADS_COUNT", std::getenv("CUSTOM_INTRA_OP_THREADS_COUNT")},
-        {"DXRT_DYNAMIC_CPU_THREAD", std::getenv("DXRT_DYNAMIC_CPU_THREAD")},
-        {"DXRT_TASK_MAX_LOAD", std::getenv("DXRT_TASK_MAX_LOAD")},
-        {"NFH_INPUT_WORKER_THREADS", std::getenv("NFH_INPUT_WORKER_THREADS")},
-        {"NFH_OUTPUT_WORKER_THREADS", std::getenv("NFH_OUTPUT_WORKER_THREADS")},
+        {"CUSTOM_INTER_OP_THREADS_COUNT", getenvOrNull("CUSTOM_INTER_OP_THREADS_COUNT")},
+        {"CUSTOM_INTRA_OP_THREADS_COUNT", getenvOrNull("CUSTOM_INTRA_OP_THREADS_COUNT")},
+        {"DXRT_DYNAMIC_CPU_THREAD", getenvOrNull("DXRT_DYNAMIC_CPU_THREAD")},
+        {"DXRT_TASK_MAX_LOAD", getenvOrNull("DXRT_TASK_MAX_LOAD")},
+        {"NFH_INPUT_WORKER_THREADS", getenvOrNull("NFH_INPUT_WORKER_THREADS")},
+        {"NFH_OUTPUT_WORKER_THREADS", getenvOrNull("NFH_OUTPUT_WORKER_THREADS")},
     };
 
     return json{

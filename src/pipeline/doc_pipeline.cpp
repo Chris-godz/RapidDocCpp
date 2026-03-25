@@ -329,14 +329,14 @@ PageResult DocPipeline::processPage(const PageImage& pageImage) {
     auto unsupportedBoxes = result.layoutResult.getUnsupportedBoxes();
 
     // OCR on text regions
-    if (ocrPipeline_ && config_.stages.enableOcr) {
-        auto ocrElements = runOcrOnRegions(image, textBoxes);
+    if (config_.stages.enableOcr) {
+        auto ocrElements = runOcrOnRegions(image, textBoxes, pageImage.pageIndex);
         result.elements.insert(result.elements.end(), ocrElements.begin(), ocrElements.end());
     }
 
     // Table recognition
-    if (tableRecognizer_ && config_.stages.enableWiredTable) {
-        auto tableElements = runTableRecognition(image, tableBoxes);
+    if (config_.stages.enableWiredTable) {
+        auto tableElements = runTableRecognition(image, tableBoxes, pageImage.pageIndex);
         result.elements.insert(result.elements.end(), tableElements.begin(), tableElements.end());
     }
 
@@ -350,7 +350,7 @@ PageResult DocPipeline::processPage(const PageImage& pageImage) {
     }
 
     // Handle truly unsupported elements (non-formula)
-    auto skipElements = handleUnsupportedElements(unsupportedBoxes);
+    auto skipElements = handleUnsupportedElements(unsupportedBoxes, pageImage.pageIndex);
     result.elements.insert(result.elements.end(), skipElements.begin(), skipElements.end());
 
     // Step 3: Reading order sort
@@ -384,23 +384,20 @@ PageResult DocPipeline::processPage(const PageImage& pageImage) {
 // OCR helper: submit one crop and block-wait for result
 // ---------------------------------------------------------------------------
 std::string DocPipeline::ocrOnCrop(const cv::Mat& crop, int64_t taskId) {
-    if (!ocrPipeline_ || crop.empty()) return "";
+    if (crop.empty()) return "";
 
-    if (!ocrPipeline_->pushTask(crop, taskId))
+    if (!submitOcrTask(crop, taskId))
         return "";
 
     std::vector<ocr::PipelineOCRResult> ocrResults;
-    int64_t resultId = -1;
     bool success = false;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    while (!ocrPipeline_->getResult(ocrResults, resultId, nullptr, &success)) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            LOG_WARN("OCR timeout for task {}", taskId);
-            return "";
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if (!waitForOcrResult(taskId, ocrResults, success)) {
+        LOG_WARN("OCR timeout for task {}", taskId);
+        return "";
     }
-    if (!success || ocrResults.empty()) return "";
+    if (!success || ocrResults.empty()) {
+        return "";
+    }
 
     std::string combined;
     for (const auto& r : ocrResults) {
@@ -410,12 +407,86 @@ std::string DocPipeline::ocrOnCrop(const cv::Mat& crop, int64_t taskId) {
     return combined;
 }
 
+bool DocPipeline::submitOcrTask(const cv::Mat& crop, int64_t taskId) {
+    if (ocrSubmitHook_) {
+        return ocrSubmitHook_(crop, taskId);
+    }
+    if (!ocrPipeline_) {
+        return false;
+    }
+    return ocrPipeline_->pushTask(crop, taskId);
+}
+
+bool DocPipeline::fetchOcrResult(
+    std::vector<ocr::PipelineOCRResult>& results,
+    int64_t& resultId,
+    bool& success)
+{
+    if (ocrFetchHook_) {
+        return ocrFetchHook_(results, resultId, success);
+    }
+    if (!ocrPipeline_) {
+        return false;
+    }
+    return ocrPipeline_->getResult(results, resultId, nullptr, &success);
+}
+
+bool DocPipeline::waitForOcrResult(
+    int64_t taskId,
+    std::vector<ocr::PipelineOCRResult>& results,
+    bool& success)
+{
+    results.clear();
+    success = false;
+
+    auto buffered = bufferedOcrResults_.find(taskId);
+    if (buffered != bufferedOcrResults_.end()) {
+        results = std::move(buffered->second.results);
+        success = buffered->second.success;
+        bufferedOcrResults_.erase(buffered);
+        return true;
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + ocrWaitTimeout_;
+    while (std::chrono::steady_clock::now() <= deadline) {
+        std::vector<ocr::PipelineOCRResult> fetchedResults;
+        int64_t resultId = -1;
+        bool fetchedSuccess = false;
+        if (!fetchOcrResult(fetchedResults, resultId, fetchedSuccess)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+
+        if (resultId == taskId) {
+            results = std::move(fetchedResults);
+            success = fetchedSuccess;
+            return true;
+        }
+
+        if (timedOutOcrTaskIds_.count(resultId) > 0 || resultId < taskId) {
+            LOG_WARN("Discarding stale OCR result {} while waiting for {}", resultId, taskId);
+            continue;
+        }
+
+        bufferedOcrResults_[resultId] = {std::move(fetchedResults), fetchedSuccess};
+        LOG_DEBUG("Buffered out-of-order OCR result {} while waiting for {}", resultId, taskId);
+    }
+
+    timedOutOcrTaskIds_.insert(taskId);
+    return false;
+}
+
+int64_t DocPipeline::allocateOcrTaskId() {
+    return nextOcrTaskId_.fetch_add(1);
+}
+
 // ---------------------------------------------------------------------------
 // OCR on text regions detected by layout
 // ---------------------------------------------------------------------------
 std::vector<ContentElement> DocPipeline::runOcrOnRegions(
     const cv::Mat& image,
-    const std::vector<LayoutBox>& textBoxes)
+    const std::vector<LayoutBox>& textBoxes,
+    int pageIndex)
 {
     std::vector<ContentElement> elements;
 
@@ -427,6 +498,7 @@ std::vector<ContentElement> DocPipeline::runOcrOnRegions(
                     : ContentElement::Type::TEXT;
         elem.layoutBox = box;
         elem.confidence = box.confidence;
+        elem.pageIndex = pageIndex;
 
         cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
         if (roi.width <= 0 || roi.height <= 0) {
@@ -435,7 +507,7 @@ std::vector<ContentElement> DocPipeline::runOcrOnRegions(
             continue;
         }
 
-        elem.text = ocrOnCrop(image(roi).clone(), static_cast<int64_t>(bi));
+        elem.text = ocrOnCrop(image(roi).clone(), allocateOcrTaskId());
         elements.push_back(elem);
     }
 
@@ -447,57 +519,54 @@ std::vector<ContentElement> DocPipeline::runOcrOnRegions(
 // ---------------------------------------------------------------------------
 std::vector<ContentElement> DocPipeline::runTableRecognition(
     const cv::Mat& image,
-    const std::vector<LayoutBox>& tableBoxes)
+    const std::vector<LayoutBox>& tableBoxes,
+    int pageIndex)
 {
     std::vector<ContentElement> elements;
-    int64_t cellTaskId = 10000;
 
     for (const auto& box : tableBoxes) {
         ContentElement elem;
         elem.type = ContentElement::Type::TABLE;
         elem.layoutBox = box;
+        elem.pageIndex = pageIndex;
 
         cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
         if (roi.width <= 0 || roi.height <= 0) {
-            elem.skipped = true;
-            elements.push_back(elem);
+            elements.push_back(makeTableFallbackElement(box, pageIndex, "invalid_table_bbox"));
             continue;
         }
 
         cv::Mat tableCrop = image(roi);
 
-        // In UNET-only mode (matching Python), run UNET on ALL tables
-        // without wired/wireless classification.
-        if (tableRecognizer_) {
-            TableResult tableResult = tableRecognizer_->recognize(tableCrop);
+        TableResult tableResult = recognizeTable(tableCrop);
 
-            // Match approach (like Python match_ocr_cell):
-            // 1. Run OCR on the FULL table image once
-            // 2. Match each OCR text box to the nearest cell by spatial overlap
-            if (ocrPipeline_ && config_.stages.enableOcr && !tableResult.cells.empty()) {
-                std::string tableOcrText = ocrOnCrop(tableCrop.clone(), cellTaskId++);
+        if (!tableResult.supported) {
+            const std::string reason = (tableResult.type == TableType::WIRELESS)
+                                           ? "wireless_table"
+                                           : "table_model_unavailable";
+            elements.push_back(makeTableFallbackElement(box, pageIndex, reason));
+            continue;
+        }
 
-                // Get the raw OCR results with bounding boxes
-                // Re-submit for detailed box-level results
-                ocrPipeline_->pushTask(tableCrop.clone(), cellTaskId);
+        if (tableResult.cells.empty()) {
+            elements.push_back(makeTableFallbackElement(box, pageIndex, "no_cell_table"));
+            continue;
+        }
+
+        // Match approach (like Python match_ocr_cell):
+        // 1. Run OCR on the FULL table image once
+        // 2. Match each OCR text box to the nearest cell by spatial overlap
+        if (config_.stages.enableOcr && (ocrPipeline_ || (ocrSubmitHook_ && ocrFetchHook_))) {
+            const int64_t ocrTaskId = allocateOcrTaskId();
+            if (submitOcrTask(tableCrop.clone(), ocrTaskId)) {
                 std::vector<ocr::PipelineOCRResult> ocrBoxes;
-                int64_t rid = -1;
                 bool ok = false;
-                auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-                while (!ocrPipeline_->getResult(ocrBoxes, rid, nullptr, &ok)) {
-                    if (std::chrono::steady_clock::now() > dl) break;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-                cellTaskId++;
-
-                if (ok && !ocrBoxes.empty()) {
+                if (waitForOcrResult(ocrTaskId, ocrBoxes, ok) && ok && !ocrBoxes.empty()) {
                     // Match each OCR box to cells by containment/overlap
                     for (const auto& ocrRes : ocrBoxes) {
                         if (ocrRes.text.empty()) continue;
-                        // Get OCR box bounding rect
                         cv::Rect ocrRect = ocrRes.getBoundingRect();
 
-                        // Find the best matching cell
                         int bestCell = -1;
                         float bestOverlap = 0.0f;
                         for (size_t ci = 0; ci < tableResult.cells.size(); ++ci) {
@@ -522,22 +591,73 @@ std::vector<ContentElement> DocPipeline::runTableRecognition(
                         }
                     }
                 }
-
-                tableResult.html = tableRecognizer_->generateHtml(tableResult.cells);
             }
-
-            elem.html = tableResult.html;
-            elem.skipped = !tableResult.supported;
         }
 
+        try {
+            elem.html = generateTableHtml(tableResult.cells);
+        } catch (const std::exception& ex) {
+            LOG_WARN("Illegal table structure at page {}: {}", pageIndex, ex.what());
+            elements.push_back(makeTableFallbackElement(box, pageIndex, "illegal_table_structure"));
+            continue;
+        }
+
+        if (elem.html.empty()) {
+            elements.push_back(makeTableFallbackElement(box, pageIndex, "empty_table_html"));
+            continue;
+        }
+
+        elem.skipped = false;
         elements.push_back(elem);
     }
 
     return elements;
 }
 
+TableResult DocPipeline::recognizeTable(const cv::Mat& tableCrop) {
+    if (tableRecognizeHook_) {
+        return tableRecognizeHook_(tableCrop);
+    }
+    if (!tableRecognizer_) {
+        TableResult unavailable;
+        unavailable.type = TableType::UNKNOWN;
+        unavailable.supported = false;
+        return unavailable;
+    }
+    return tableRecognizer_->recognize(tableCrop);
+}
+
+std::string DocPipeline::generateTableHtml(const std::vector<TableCell>& cells) {
+    if (tableHtmlHook_) {
+        return tableHtmlHook_(cells);
+    }
+    if (!tableRecognizer_) {
+        return "";
+    }
+    return tableRecognizer_->generateHtml(cells);
+}
+
+std::string DocPipeline::tableFallbackMessage(const std::string& reason) {
+    return "[Unsupported table: " + reason + "]";
+}
+
+ContentElement DocPipeline::makeTableFallbackElement(
+    const LayoutBox& box,
+    int pageIndex,
+    const std::string& reason) const
+{
+    ContentElement elem;
+    elem.type = ContentElement::Type::TABLE;
+    elem.layoutBox = box;
+    elem.pageIndex = pageIndex;
+    elem.skipped = true;
+    elem.text = tableFallbackMessage(reason);
+    return elem;
+}
+
 std::vector<ContentElement> DocPipeline::handleUnsupportedElements(
-    const std::vector<LayoutBox>& unsupportedBoxes)
+    const std::vector<LayoutBox>& unsupportedBoxes,
+    int pageIndex)
 {
     std::vector<ContentElement> elements;
 
@@ -549,9 +669,11 @@ std::vector<ContentElement> DocPipeline::handleUnsupportedElements(
 
         ContentElement elem;
         elem.layoutBox = box;
+        elem.pageIndex = pageIndex;
         elem.skipped = true;
         elem.type = ContentElement::Type::UNKNOWN;
-        elem.text = "[Unsupported element type]";
+        elem.text = "[Unsupported layout category: " +
+                    std::string(layoutCategoryToString(box.category)) + "]";
 
         LOG_DEBUG("Skipping unsupported element: {} at ({}, {})",
                   layoutCategoryToString(box.category), box.x0, box.y0);
@@ -587,8 +709,10 @@ void DocPipeline::saveExtractedImages(
         ContentElement elem;
         elem.type = ContentElement::Type::IMAGE;
         elem.layoutBox = box;
-        elem.imagePath = filename;
         elem.pageIndex = pageIndex;
+        if (config_.runtime.saveImages) {
+            elem.imagePath = filename;
+        }
         elements.push_back(elem);
     }
 }
@@ -620,8 +744,10 @@ void DocPipeline::saveFormulaImages(
         ContentElement elem;
         elem.type = ContentElement::Type::EQUATION;
         elem.layoutBox = box;
-        elem.imagePath = filename;  // store path for image-based formula output
         elem.pageIndex = pageIndex;
+        if (config_.runtime.saveImages) {
+            elem.imagePath = filename;  // store path for image-based formula output
+        }
         elements.push_back(elem);
     }
 }

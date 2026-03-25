@@ -30,10 +30,14 @@ const char* layoutCategoryToString(LayoutCategory cat) {
 }
 
 bool isCategorySupported(LayoutCategory cat) {
-    // All categories are "supported" at the pipeline level;
-    // equations are handled separately (image fallback)
-    (void)cat;
-    return true;
+    switch (cat) {
+        case LayoutCategory::UNKNOWN:
+        case LayoutCategory::TOC:
+        case LayoutCategory::SEPARATOR:
+            return false;
+        default:
+            return true;
+    }
 }
 
 std::vector<LayoutBox> LayoutResult::getBoxesByCategory(LayoutCategory cat) const {

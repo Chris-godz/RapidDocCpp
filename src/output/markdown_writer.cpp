@@ -26,12 +26,14 @@ std::string MarkdownWriter::elementToMarkdown(const ContentElement& elem) const 
     case ContentElement::Type::TABLE:
         if (!elem.html.empty())
             return elem.html + "\n\n";
+        if (!elem.text.empty())
+            return elem.text + "\n\n";
         return {};
 
     case ContentElement::Type::IMAGE:
         if (!elem.imagePath.empty())
             return "![](" + elem.imagePath + ")\n\n";
-        return "![]()\n\n";
+        return {};
 
     case ContentElement::Type::EQUATION:
         // Python: formula rendered as image (no LaTeX on NPU)
