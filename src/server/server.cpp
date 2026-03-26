@@ -16,12 +16,14 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -192,6 +194,24 @@ std::string base64Encode(const unsigned char* data, size_t len) {
     return encoded;
 }
 
+uint64_t msToUs(double ms) {
+    if (ms <= 0.0) {
+        return 0;
+    }
+    return static_cast<uint64_t>(ms * 1000.0);
+}
+
+void updateAtomicMax(std::atomic<uint64_t>& target, uint64_t value) {
+    uint64_t current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(
+               current,
+               value,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+}
+
 std::vector<uint8_t> base64Decode(const std::string& encoded) {
     static const std::string kBase64Chars =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -273,8 +293,8 @@ json getenvOrNull(const char* name) {
     return std::string(value);
 }
 
-json makeStatsJson(const DocumentResult& result) {
-    return json{
+json makeStatsJson(const DocumentResult& result, std::optional<double> pipelineCallMs = std::nullopt) {
+    json stats{
         {"pages", result.processedPages},
         {"total_pages", result.totalPages},
         {"skipped", result.skippedElements},
@@ -283,8 +303,17 @@ json makeStatsJson(const DocumentResult& result) {
         {"layout_ms", result.stats.layoutTimeMs},
         {"ocr_ms", result.stats.ocrTimeMs},
         {"table_ms", result.stats.tableTimeMs},
+        {"npu_serial_ms", result.stats.npuSerialTimeMs},
+        {"cpu_only_ms", result.stats.cpuOnlyTimeMs},
+        {"npu_lock_wait_ms", result.stats.npuLockWaitTimeMs},
+        {"npu_lock_hold_ms", result.stats.npuLockHoldTimeMs},
         {"output_gen_ms", result.stats.outputGenTimeMs},
     };
+
+    if (pipelineCallMs.has_value()) {
+        stats["pipeline_call_ms"] = *pipelineCallMs;
+    }
+    return stats;
 }
 
 json buildContentListJson(const DocumentResult& result) {
@@ -417,6 +446,16 @@ json collectAbsoluteFiles(const fs::path& dir) {
     return files;
 }
 
+std::string makeRequestId() {
+    static std::atomic<uint64_t> counter{0};
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const uint64_t id = counter.fetch_add(1, std::memory_order_relaxed);
+    std::ostringstream out;
+    out << "req_" << nowMs << "_" << id;
+    return out.str();
+}
+
 struct FileParseOptions {
     std::string outputDir = "./output-offline";
     bool clearOutputFile = false;
@@ -464,28 +503,27 @@ std::vector<std::string> collectRequestWarnings(const FileParseOptions& options)
     return warnings;
 }
 
-class PipelineStateGuard {
-public:
-    explicit PipelineStateGuard(DocPipeline& pipeline)
-        : pipeline_(pipeline)
-        , originalConfig_(pipeline.config()) {}
-
-    ~PipelineStateGuard() {
-        pipeline_.setStageOptions(originalConfig_.stages);
-        pipeline_.setOutputDir(originalConfig_.runtime.outputDir);
-        pipeline_.setSaveImages(originalConfig_.runtime.saveImages);
-        pipeline_.setSaveVisualization(originalConfig_.runtime.saveVisualization);
-        pipeline_.setPageRange(originalConfig_.runtime.startPageId, originalConfig_.runtime.endPageId);
-        pipeline_.setMaxPages(originalConfig_.runtime.maxPages);
-    }
-
-private:
-    DocPipeline& pipeline_;
-    PipelineConfig originalConfig_;
-};
+PipelineRunOverrides makeRunOverrides(
+    const DocPipeline& pipeline,
+    const FileParseOptions& options,
+    const fs::path& outputDir)
+{
+    PipelineRunOverrides overrides;
+    overrides.outputDir = outputDir.string();
+    overrides.saveImages = true;
+    overrides.saveVisualization = true;
+    overrides.startPageId = options.startPageId;
+    overrides.endPageId = options.endPageId;
+    overrides.enableFormula = options.formulaEnable;
+    overrides.enableWiredTable = options.tableEnable;
+    overrides.enableMarkdownOutput = pipeline.config().stages.enableMarkdownOutput;
+    return overrides;
+}
 
 struct ProcessedDocument {
+    std::string requestId;
     std::string filename;
+    fs::path requestDir;
     fs::path parseDir;
     fs::path imagesDir;
     fs::path layoutDir;
@@ -498,6 +536,9 @@ struct ProcessedDocument {
     json modelJson = json::array();
     DocumentResult result;
     std::vector<std::string> warnings;
+    double prepareTimeMs = 0.0;
+    double pipelineCallTimeMs = 0.0;
+    double assemblyTimeMs = 0.0;
 };
 
 ProcessedDocument processDocumentBytes(
@@ -514,8 +555,11 @@ ProcessedDocument processDocumentBytes(
     const std::string extension = toLower(fs::path(cleanName).extension().string());
 
     ProcessedDocument processed;
+    const auto prepareStart = std::chrono::steady_clock::now();
+    processed.requestId = makeRequestId();
     processed.filename = cleanName;
-    processed.parseDir = fs::absolute(fs::path(options.outputDir) / stem / options.parseMethod);
+    processed.requestDir = fs::absolute(fs::path(options.outputDir) / processed.requestId);
+    processed.parseDir = processed.requestDir / stem / options.parseMethod;
     processed.imagesDir = processed.parseDir / "images";
     processed.layoutDir = processed.parseDir / "layout";
     processed.markdownPath = processed.parseDir / (stem + ".md");
@@ -527,31 +571,39 @@ ProcessedDocument processDocumentBytes(
     fs::create_directories(processed.parseDir);
     writeBinaryFile(processed.parseDir / (stem + "_origin" + extension), bytes);
 
-    PipelineStateGuard guard(pipeline);
+    const PipelineRunOverrides overrides = makeRunOverrides(
+        pipeline, options, processed.parseDir);
 
-    PipelineStages stages = pipeline.config().stages;
-    stages.enableFormula = options.formulaEnable;
-    stages.enableWiredTable = options.tableEnable;
-    pipeline.setStageOptions(stages);
-    pipeline.setOutputDir(processed.parseDir.string());
-    pipeline.setSaveImages(true);
-    pipeline.setSaveVisualization(true);
-    pipeline.setPageRange(options.startPageId, options.endPageId);
-
-    if (isPdfExtension(extension)) {
-        processed.result = pipeline.processPdfFromMemory(
-            reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
-    } else if (isImageExtension(extension)) {
-        std::vector<uint8_t> buffer(bytes.begin(), bytes.end());
-        cv::Mat image = cv::imdecode(buffer, cv::IMREAD_COLOR);
-        if (image.empty()) {
-            throw std::runtime_error("Failed to decode image: " + cleanName);
-        }
-        processed.result = pipeline.processImageDocument(image, 0);
-    } else {
+    const bool isPdf = isPdfExtension(extension);
+    const bool isImage = isImageExtension(extension);
+    cv::Mat decodedImage;
+    if (!isPdf && !isImage) {
         throw std::runtime_error("Unsupported file type: " + extension);
     }
+    if (isImage) {
+        std::vector<uint8_t> buffer(bytes.begin(), bytes.end());
+        decodedImage = cv::imdecode(buffer, cv::IMREAD_COLOR);
+        if (decodedImage.empty()) {
+            throw std::runtime_error("Failed to decode image: " + cleanName);
+        }
+    }
+    const auto prepareEnd = std::chrono::steady_clock::now();
+    processed.prepareTimeMs =
+        std::chrono::duration<double, std::milli>(prepareEnd - prepareStart).count();
 
+    const auto pipelineStart = std::chrono::steady_clock::now();
+    if (isPdf) {
+        processed.result = pipeline.processPdfFromMemoryWithOverrides(
+            reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), overrides);
+    } else if (isImage) {
+        processed.result = pipeline.processImageDocumentWithOverrides(
+            decodedImage, 0, overrides);
+    }
+    const auto pipelineEnd = std::chrono::steady_clock::now();
+    processed.pipelineCallTimeMs =
+        std::chrono::duration<double, std::milli>(pipelineEnd - pipelineStart).count();
+
+    const auto assemblyStart = std::chrono::steady_clock::now();
     writeTextFile(processed.markdownPath, processed.result.markdown);
     writeTextFile(processed.contentListPath, processed.result.contentListJson);
 
@@ -561,6 +613,23 @@ ProcessedDocument processDocumentBytes(
 
     writeTextFile(processed.middleJsonPath, processed.middleJson.dump(2));
     writeTextFile(processed.modelJsonPath, processed.modelJson.dump(2));
+    const auto assemblyEnd = std::chrono::steady_clock::now();
+    processed.assemblyTimeMs =
+        std::chrono::duration<double, std::milli>(assemblyEnd - assemblyStart).count();
+
+    LOG_INFO(
+        "request={} lock_wait={:.2f}ms lock_hold={:.2f}ms npu={:.2f}ms cpu={:.2f}ms "
+        "prepare={:.2f}ms pipeline_call={:.2f}ms assemble={:.2f}ms pages={}/{}",
+        processed.requestId,
+        processed.result.stats.npuLockWaitTimeMs,
+        processed.result.stats.npuLockHoldTimeMs,
+        processed.result.stats.npuSerialTimeMs,
+        processed.result.stats.cpuOnlyTimeMs,
+        processed.prepareTimeMs,
+        processed.pipelineCallTimeMs,
+        processed.assemblyTimeMs,
+        processed.result.processedPages,
+        processed.result.totalPages);
 
     return processed;
 }
@@ -571,7 +640,7 @@ json buildFileResult(const ProcessedDocument& processed, const FileParseOptions&
         {"backend", options.backend},
         {"deepx", true},
         {"engines", makeEngineJson(options.tableEnable, options.formulaEnable)},
-        {"stats", makeStatsJson(processed.result)},
+        {"stats", makeStatsJson(processed.result, processed.pipelineCallTimeMs)},
         {"output_dir", processed.parseDir.string()},
         {"markdown_path", processed.markdownPath.string()},
         {"content_list_path", processed.contentListPath.string()},
@@ -660,6 +729,7 @@ DocServer::DocServer(const ServerConfig& config)
     fs::create_directories(config_.uploadDir);
 
     pipeline_ = std::make_unique<DocPipeline>(config_.pipelineConfig);
+    pipeline_->externalNpuSerialMutex_ = &pipelineMutex_;
     if (!pipeline_->initialize()) {
         throw std::runtime_error("Failed to initialize document pipeline");
     }
@@ -723,23 +793,20 @@ void DocServer::run() {
             options.returnContentList = true;
             options.clearOutputFile = true;
 
-            json legacyResponse;
-            {
-                std::scoped_lock<std::mutex> lock(pipelineMutex_);
-                const ProcessedDocument processed = processDocumentBytes(
-                    *pipeline_, filePart.body, filename, options);
-                legacyResponse = json{
-                    {"pages", processed.result.processedPages},
-                    {"total_pages", processed.result.totalPages},
-                    {"skipped", processed.result.skippedElements},
-                    {"time_ms", processed.result.totalTimeMs},
-                    {"stats", makeStatsJson(processed.result)},
-                    {"markdown", processed.result.markdown},
-                    {"content_list", processed.contentList},
-                    {"output_dir", processed.parseDir.string()},
-                };
-                fs::remove_all(processed.parseDir.parent_path());
-            }
+            const ProcessedDocument processed = processDocumentBytes(
+                *pipeline_, filePart.body, filename, options);
+            recordPipelineLockStats(processed.result);
+            json legacyResponse{
+                {"pages", processed.result.processedPages},
+                {"total_pages", processed.result.totalPages},
+                {"skipped", processed.result.skippedElements},
+                {"time_ms", processed.result.totalTimeMs},
+                {"stats", makeStatsJson(processed.result, processed.pipelineCallTimeMs)},
+                {"markdown", processed.result.markdown},
+                {"content_list", processed.contentList},
+                {"output_dir", processed.parseDir.string()},
+            };
+            fs::remove_all(processed.requestDir);
 
             successCount_++;
             crow::response resp(200, legacyResponse.dump());
@@ -777,26 +844,23 @@ void DocServer::run() {
             options.returnContentList = true;
             options.clearOutputFile = true;
 
-            json legacyResponse;
-            {
-                std::scoped_lock<std::mutex> lock(pipelineMutex_);
-                const ProcessedDocument processed = processDocumentBytes(
-                    *pipeline_,
-                    std::string(reinterpret_cast<const char*>(decoded.data()), decoded.size()),
-                    filename,
-                    options);
-                legacyResponse = json{
-                    {"pages", processed.result.processedPages},
-                    {"total_pages", processed.result.totalPages},
-                    {"skipped", processed.result.skippedElements},
-                    {"time_ms", processed.result.totalTimeMs},
-                    {"stats", makeStatsJson(processed.result)},
-                    {"markdown", processed.result.markdown},
-                    {"content_list", processed.contentList},
-                    {"output_dir", processed.parseDir.string()},
-                };
-                fs::remove_all(processed.parseDir.parent_path());
-            }
+            const ProcessedDocument processed = processDocumentBytes(
+                *pipeline_,
+                std::string(reinterpret_cast<const char*>(decoded.data()), decoded.size()),
+                filename,
+                options);
+            recordPipelineLockStats(processed.result);
+            json legacyResponse{
+                {"pages", processed.result.processedPages},
+                {"total_pages", processed.result.totalPages},
+                {"skipped", processed.result.skippedElements},
+                {"time_ms", processed.result.totalTimeMs},
+                {"stats", makeStatsJson(processed.result, processed.pipelineCallTimeMs)},
+                {"markdown", processed.result.markdown},
+                {"content_list", processed.contentList},
+                {"output_dir", processed.parseDir.string()},
+            };
+            fs::remove_all(processed.requestDir);
 
             successCount_++;
             crow::response resp(200, legacyResponse.dump());
@@ -836,7 +900,6 @@ void DocServer::run() {
             int successFiles = 0;
             const auto requestWarnings = collectRequestWarnings(options);
 
-            std::scoped_lock<std::mutex> lock(pipelineMutex_);
             for (const auto& part : fileParts) {
                 std::string filename = "upload.bin";
                 const auto disposition = part.get_header_object("Content-Disposition");
@@ -848,6 +911,7 @@ void DocServer::run() {
                 try {
                     ProcessedDocument processed = processDocumentBytes(
                         *pipeline_, part.body, filename, options);
+                    recordPipelineLockStats(processed.result);
                     json fileResult = buildFileResult(processed, options);
                     if (!requestWarnings.empty()) {
                         fileResult["request_warnings"] = requestWarnings;
@@ -856,7 +920,7 @@ void DocServer::run() {
                     successFiles++;
 
                     if (options.clearOutputFile) {
-                        fs::remove_all(processed.parseDir.parent_path());
+                        fs::remove_all(processed.requestDir);
                     }
                 }
                 catch (const std::exception& e) {
@@ -905,7 +969,6 @@ void DocServer::run() {
             const bool globalDeepx = requestBody.value("deepx", true);
             json responses = json::array();
 
-            std::scoped_lock<std::mutex> lock(pipelineMutex_);
             size_t index = 0;
             for (const auto& requestItem : requestBody["requests"]) {
                 try {
@@ -991,6 +1054,7 @@ void DocServer::run() {
 
                     const ProcessedDocument processed = processDocumentBytes(
                         *pipeline_, imageBytes, imageName, options);
+                    recordPipelineLockStats(processed.result);
 
                     json responseItem;
                     if (textDetection) {
@@ -1011,7 +1075,7 @@ void DocServer::run() {
                     }
 
                     responses.push_back(std::move(responseItem));
-                    fs::remove_all(processed.parseDir.parent_path());
+                    fs::remove_all(processed.requestDir);
                 }
                 catch (const std::exception& e) {
                     responses.push_back(json{
@@ -1058,30 +1122,52 @@ std::string DocServer::handleProcess(const std::string& pdfData, const std::stri
     options.returnContentList = true;
     options.clearOutputFile = true;
 
-    std::scoped_lock<std::mutex> lock(pipelineMutex_);
-    const ProcessedDocument processed = processDocumentBytes(*pipeline_, pdfData, filename, options);
+    const ProcessedDocument processed = processDocumentBytes(
+        *pipeline_, pdfData, filename, options);
+    recordPipelineLockStats(processed.result);
 
     json response{
         {"pages", processed.result.processedPages},
         {"total_pages", processed.result.totalPages},
         {"skipped", processed.result.skippedElements},
         {"time_ms", processed.result.totalTimeMs},
-        {"stats", makeStatsJson(processed.result)},
+        {"stats", makeStatsJson(processed.result, processed.pipelineCallTimeMs)},
         {"markdown", processed.result.markdown},
         {"content_list", processed.contentList},
         {"output_dir", processed.parseDir.string()},
     };
 
-    fs::remove_all(processed.parseDir.parent_path());
+    fs::remove_all(processed.requestDir);
     return response.dump();
 }
 
 std::string DocServer::buildStatusJson() {
+    const uint64_t samples = lockSamples_.load(std::memory_order_relaxed);
+    const uint64_t waitUsTotal = lockWaitUsTotal_.load(std::memory_order_relaxed);
+    const uint64_t holdUsTotal = lockHoldUsTotal_.load(std::memory_order_relaxed);
+    const double waitAvgMs = samples == 0 ? 0.0 :
+        static_cast<double>(waitUsTotal) / static_cast<double>(samples) / 1000.0;
+    const double holdAvgMs = samples == 0 ? 0.0 :
+        static_cast<double>(holdUsTotal) / static_cast<double>(samples) / 1000.0;
+
     json status{
         {"status", running_.load() ? "running" : "stopped"},
         {"requests", requestCount_.load()},
         {"success", successCount_.load()},
         {"errors", errorCount_.load()},
+        {"pipeline_lock", {
+            {"samples", samples},
+            {"wait_total_ms", static_cast<double>(waitUsTotal) / 1000.0},
+            {"wait_avg_ms", waitAvgMs},
+            {"wait_max_ms", static_cast<double>(lockWaitUsMax_.load(std::memory_order_relaxed)) / 1000.0},
+            {"hold_total_ms", static_cast<double>(holdUsTotal) / 1000.0},
+            {"hold_avg_ms", holdAvgMs},
+            {"hold_max_ms", static_cast<double>(lockHoldUsMax_.load(std::memory_order_relaxed)) / 1000.0},
+        }},
+        {"pipeline_stage_totals", {
+            {"npu_serial_ms", static_cast<double>(npuStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"cpu_only_ms", static_cast<double>(cpuStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+        }},
         {"engines", makeEngineJson(true, true)},
         {"capabilities", {
             {"layout", true},
@@ -1096,6 +1182,21 @@ std::string DocServer::buildStatusJson() {
         }},
     };
     return status.dump();
+}
+
+void DocServer::recordPipelineLockStats(const DocumentResult& result) {
+    const uint64_t waitUs = msToUs(result.stats.npuLockWaitTimeMs);
+    const uint64_t holdUs = msToUs(result.stats.npuLockHoldTimeMs);
+    const uint64_t npuUs = msToUs(result.stats.npuSerialTimeMs);
+    const uint64_t cpuUs = msToUs(result.stats.cpuOnlyTimeMs);
+
+    lockSamples_.fetch_add(1, std::memory_order_relaxed);
+    lockWaitUsTotal_.fetch_add(waitUs, std::memory_order_relaxed);
+    lockHoldUsTotal_.fetch_add(holdUs, std::memory_order_relaxed);
+    npuStageUsTotal_.fetch_add(npuUs, std::memory_order_relaxed);
+    cpuStageUsTotal_.fetch_add(cpuUs, std::memory_order_relaxed);
+    updateAtomicMax(lockWaitUsMax_, waitUs);
+    updateAtomicMax(lockHoldUsMax_, holdUs);
 }
 
 } // namespace rapid_doc

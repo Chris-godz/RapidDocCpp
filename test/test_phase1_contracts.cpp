@@ -3,6 +3,8 @@
 #include <opencv2/opencv.hpp>
 
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <tuple>
 
@@ -80,6 +82,16 @@ size_t countSubstr(const std::string& s, const std::string& needle) {
         pos += needle.size();
     }
     return count;
+}
+
+std::string readFileBytes(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        return {};
+    }
+    return std::string(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
 }
 
 } // namespace
@@ -404,4 +416,62 @@ TEST(Phase1CorrectnessContracts, save_images_false_does_not_emit_broken_paths) {
     ASSERT_EQ(parsed[0].size(), 2u);
     EXPECT_FALSE(parsed[0][0].contains("image_path"));
     EXPECT_FALSE(parsed[0][1].contains("image_path"));
+}
+
+TEST(Phase1CorrectnessContracts, request_local_overrides_do_not_mutate_shared_pipeline_config) {
+    auto cfg = makeContractConfig();
+    cfg.stages.enablePdfRender = true;
+    cfg.stages.enableLayout = false;
+    cfg.stages.enableOcr = false;
+    cfg.stages.enableWiredTable = false;
+    cfg.stages.enableFormula = false;
+    cfg.stages.enableReadingOrder = false;
+    cfg.stages.enableMarkdownOutput = true;
+    cfg.runtime.maxPages = 0;
+    cfg.runtime.startPageId = 0;
+    cfg.runtime.endPageId = -1;
+    cfg.runtime.outputDir = std::string(PROJECT_ROOT_DIR) + "/test/fixtures/contract_output/default";
+    cfg.runtime.saveImages = false;
+    cfg.runtime.saveVisualization = false;
+
+    DocPipeline pipeline(cfg);
+    ASSERT_TRUE(pipeline.initialize());
+
+    const std::filesystem::path pdfPath =
+        std::filesystem::path(PROJECT_ROOT_DIR) / "test_files" / "small_ocr_origin.pdf";
+    if (!std::filesystem::exists(pdfPath)) {
+        GTEST_SKIP() << "Missing fixture PDF: " << pdfPath;
+    }
+
+    const std::string bytes = readFileBytes(pdfPath);
+    ASSERT_FALSE(bytes.empty());
+
+    const PipelineConfig before = pipeline.config();
+
+    PipelineRunOverrides overrides;
+    overrides.outputDir = std::string(PROJECT_ROOT_DIR) + "/test/fixtures/contract_output/override";
+    overrides.saveImages = true;
+    overrides.saveVisualization = true;
+    overrides.startPageId = 0;
+    overrides.endPageId = 0;
+    overrides.maxPages = 1;
+    overrides.enableWiredTable = false;
+    overrides.enableFormula = false;
+    overrides.enableMarkdownOutput = false;
+
+    const DocumentResult result = pipeline.processPdfFromMemoryWithOverrides(
+        reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), overrides);
+    ASSERT_EQ(result.processedPages, 1);
+    ASSERT_EQ(result.totalPages, 1);
+
+    const PipelineConfig after = pipeline.config();
+    EXPECT_EQ(after.runtime.outputDir, before.runtime.outputDir);
+    EXPECT_EQ(after.runtime.saveImages, before.runtime.saveImages);
+    EXPECT_EQ(after.runtime.saveVisualization, before.runtime.saveVisualization);
+    EXPECT_EQ(after.runtime.startPageId, before.runtime.startPageId);
+    EXPECT_EQ(after.runtime.endPageId, before.runtime.endPageId);
+    EXPECT_EQ(after.runtime.maxPages, before.runtime.maxPages);
+    EXPECT_EQ(after.stages.enableFormula, before.stages.enableFormula);
+    EXPECT_EQ(after.stages.enableWiredTable, before.stages.enableWiredTable);
+    EXPECT_EQ(after.stages.enableMarkdownOutput, before.stages.enableMarkdownOutput);
 }

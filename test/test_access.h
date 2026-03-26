@@ -2,6 +2,7 @@
 
 #include "pipeline/doc_pipeline.h"
 #include "server/server.h"
+#include <mutex>
 
 namespace rapid_doc {
 
@@ -19,6 +20,7 @@ public:
     static void clearOcrHooks(DocPipeline& pipeline) {
         pipeline.ocrSubmitHook_ = {};
         pipeline.ocrFetchHook_ = {};
+        std::lock_guard<std::mutex> lock(pipeline.ocrStateMutex_);
         pipeline.bufferedOcrResults_.clear();
         pipeline.timedOutOcrTaskIds_.clear();
     }

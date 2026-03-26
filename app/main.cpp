@@ -19,6 +19,7 @@
 #include "pipeline/doc_pipeline.h"
 #include "common/config.h"
 #include "common/logger.h"
+#include "output/detail_report.h"
 #include <iostream>
 #include <string>
 #include <fstream>
@@ -38,6 +39,8 @@ void printUsage(const char* programName) {
     std::cout << "      --no-table          Disable table recognition\n";
     std::cout << "      --no-ocr            Disable OCR\n";
     std::cout << "      --json-only         Output JSON only (no Markdown)\n";
+    std::cout << "      --detail            Print and save a human-readable detail report\n";
+    std::cout << "      --detail-file <p>   Override detail report output path\n";
     std::cout << "  -v, --verbose           Verbose logging\n";
     std::cout << "  -h, --help              Show this help\n";
     std::cout << "\n";
@@ -53,6 +56,8 @@ struct CliArgs {
     bool enableTable = true;
     bool enableOcr = true;
     bool jsonOnly = false;
+    bool detail = false;
+    std::string detailPath;
     bool verbose = false;
 };
 
@@ -60,6 +65,8 @@ enum LongOnlyOpt {
     OPT_NO_TABLE = 256,
     OPT_NO_OCR,
     OPT_JSON_ONLY,
+    OPT_DETAIL,
+    OPT_DETAIL_FILE,
 };
 
 bool parseArgs(int argc, char* argv[], CliArgs& args) {
@@ -71,6 +78,8 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
         {"no-table",  no_argument,       nullptr, OPT_NO_TABLE},
         {"no-ocr",    no_argument,       nullptr, OPT_NO_OCR},
         {"json-only", no_argument,       nullptr, OPT_JSON_ONLY},
+        {"detail",    no_argument,       nullptr, OPT_DETAIL},
+        {"detail-file", required_argument, nullptr, OPT_DETAIL_FILE},
         {"verbose",   no_argument,       nullptr, 'v'},
         {"help",      no_argument,       nullptr, 'h'},
         {nullptr,     0,                 nullptr, 0}
@@ -86,6 +95,8 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
             case OPT_NO_TABLE: args.enableTable = false; break;
             case OPT_NO_OCR:   args.enableOcr = false; break;
             case OPT_JSON_ONLY: args.jsonOnly = true; break;
+            case OPT_DETAIL: args.detail = true; break;
+            case OPT_DETAIL_FILE: args.detailPath = optarg; break;
             case 'v': args.verbose = true; break;
             case 'h': printUsage(argv[0]); return false;
             default:  printUsage(argv[0]); return false;
@@ -128,6 +139,7 @@ int main(int argc, char* argv[]) {
     config.stages.enableWiredTable = args.enableTable;
     config.stages.enableOcr = args.enableOcr;
     config.stages.enableMarkdownOutput = !args.jsonOnly;
+    config.runtime.saveVisualization = args.detail;
 
     // Create and initialize pipeline
     rapid_doc::DocPipeline pipeline(config);
@@ -166,6 +178,38 @@ int main(int argc, char* argv[]) {
         std::ofstream jsonFile(jsonPath);
         jsonFile << result.contentListJson;
         LOG_INFO("Saved JSON: {}", jsonPath);
+    }
+
+    if (args.detail) {
+        std::string detailPath = args.detailPath;
+        if (detailPath.empty()) {
+            detailPath = args.outputDir + "/" + baseName + "_detail.txt";
+        }
+
+        rapid_doc::DetailReportOptions detailOptions;
+        detailOptions.inputPath = args.inputPath;
+        detailOptions.stageConfig = config.stages;
+        detailOptions.saveImages = config.runtime.saveImages;
+        detailOptions.saveVisualization = config.runtime.saveVisualization;
+        detailOptions.artifacts.outputDir = args.outputDir;
+        if (!args.jsonOnly && !result.markdown.empty()) {
+            detailOptions.artifacts.markdownPath = args.outputDir + "/" + baseName + ".md";
+        }
+        if (!result.contentListJson.empty()) {
+            detailOptions.artifacts.contentListPath = args.outputDir + "/" + baseName + "_content.json";
+        }
+        if (config.runtime.saveVisualization) {
+            detailOptions.artifacts.layoutDir = args.outputDir + "/layout";
+        }
+        if (config.runtime.saveImages) {
+            detailOptions.artifacts.imagesDir = args.outputDir + "/images";
+        }
+
+        const std::string detailReport = rapid_doc::buildDetailReport(result, detailOptions);
+        std::ofstream detailFile(detailPath);
+        detailFile << detailReport;
+        LOG_INFO("Saved detail report: {}", detailPath);
+        std::cout << "\n" << detailReport;
     }
 
     // Print summary

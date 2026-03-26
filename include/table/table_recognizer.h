@@ -37,6 +37,22 @@ struct TableRecognizerConfig {
  */
 class TableRecognizer {
 public:
+    struct NpuStageResult {
+        TableType type = TableType::UNKNOWN;
+        bool supported = false;
+        cv::Mat mask;
+        float scale = 1.0f;
+        int padTop = 0;
+        int padLeft = 0;
+        int origH = 0;
+        int origW = 0;
+        double estimateTableTypeMs = 0.0;
+        double preprocessMs = 0.0;
+        double dxRunMs = 0.0;
+        double maskDecodeMs = 0.0;
+        double npuStageTimeMs = 0.0;
+    };
+
     explicit TableRecognizer(const TableRecognizerConfig& config);
     ~TableRecognizer();
 
@@ -55,6 +71,23 @@ public:
      *       For wireless tables, this will return result with supported=false.
      */
     TableResult recognize(const cv::Mat& tableImage);
+
+    /**
+     * @brief Run only the NPU-dependent phase (estimate/preprocess/dx_run/mask_decode).
+     * @param tableImage Cropped table region (BGR)
+     * @return Intermediate result for lock-safe postprocess split.
+     */
+    NpuStageResult recognizeNpuStage(const cv::Mat& tableImage);
+
+    /**
+     * @brief Finish table recognition by running CPU postprocess on NPU artifacts.
+     * @param tableImage Original cropped table image (BGR)
+     * @param npuStage NPU stage output from recognizeNpuStage()
+     * @return Final table result with cells populated
+     */
+    TableResult finalizeRecognizePostprocess(
+        const cv::Mat& tableImage,
+        const NpuStageResult& npuStage);
 
     /**
      * @brief Check if a table is likely wired (has visible borders)

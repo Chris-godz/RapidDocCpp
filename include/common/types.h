@@ -188,6 +188,32 @@ struct ContentElement {
 };
 
 /**
+ * @brief Stage timings for a single processed page
+ */
+struct PageStageStats {
+    double layoutTimeMs = 0.0;
+    double ocrTimeMs = 0.0;
+    double tableTimeMs = 0.0;
+    double figureTimeMs = 0.0;
+    double formulaTimeMs = 0.0;
+    double unsupportedTimeMs = 0.0;
+    double readingOrderTimeMs = 0.0;
+    // Non-overlapping observability slices for Phase 2 lock-splitting prep.
+    double npuSerialTimeMs = 0.0;
+    double cpuOnlyTimeMs = 0.0;
+    double npuLockWaitTimeMs = 0.0;
+    double npuLockHoldTimeMs = 0.0;
+};
+
+/**
+ * @brief Aggregated stage timings for a processed document
+ */
+struct DocumentStageStats : public PageStageStats {
+    double pdfRenderTimeMs = 0.0;
+    double outputGenTimeMs = 0.0;
+};
+
+/**
  * @brief Complete result for a single page
  */
 struct PageResult {
@@ -197,6 +223,7 @@ struct PageResult {
     LayoutResult layoutResult;
     std::vector<ContentElement> elements;  // Sorted by reading order
     std::vector<TableResult> tableResults;
+    PageStageStats stats;
     double totalTimeMs = 0.0;
 };
 
@@ -211,15 +238,7 @@ struct DocumentResult {
     int totalPages = 0;
     int processedPages = 0;
     int skippedElements = 0;                // Elements skipped due to NPU limitations
-
-    struct Stats {
-        double pdfRenderTimeMs = 0.0;
-        double layoutTimeMs = 0.0;
-        double ocrTimeMs = 0.0;
-        double tableTimeMs = 0.0;
-        double readingOrderTimeMs = 0.0;
-        double outputGenTimeMs = 0.0;
-    } stats;
+    DocumentStageStats stats;
 };
 
 } // namespace rapid_doc

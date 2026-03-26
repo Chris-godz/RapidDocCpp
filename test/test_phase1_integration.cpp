@@ -5,7 +5,10 @@
 #include <filesystem>
 #include <fstream>
 #include <deque>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <future>
 #include <tuple>
 #include <sstream>
 
@@ -228,6 +231,150 @@ TEST(Phase1Integration, ocr_timeout_does_not_poison_next_request) {
     EXPECT_EQ(
         DocPipelineTestAccess::ocrOnCrop(pipeline, crop, 101),
         "fresh-from-request-B");
+}
+
+TEST(Phase1Integration, concurrent_ocr_results_do_not_cross_requests) {
+    struct FakeOcrBackend {
+        std::mutex mutex;
+        std::deque<std::tuple<int64_t, bool, std::vector<ocr::PipelineOCRResult>>> queue;
+
+        bool push(const cv::Mat&, int64_t) { return true; }
+
+        bool fetch(std::vector<ocr::PipelineOCRResult>& out, int64_t& id, bool& success) {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (queue.empty()) {
+                return false;
+            }
+            auto item = std::move(queue.front());
+            queue.pop_front();
+            id = std::get<0>(item);
+            success = std::get<1>(item);
+            out = std::move(std::get<2>(item));
+            return true;
+        }
+    } fake;
+
+    // Duplicate out-of-order entries so either waiting thread can still converge
+    // on its own task result without cross-request text pollution.
+    fake.queue.push_back({200, true, {makeOcrResult("result-for-200")}});
+    fake.queue.push_back({100, true, {makeOcrResult("result-for-100")}});
+    fake.queue.push_back({200, true, {makeOcrResult("result-for-200")}});
+    fake.queue.push_back({100, true, {makeOcrResult("result-for-100")}});
+
+    auto cfg = makePdfOnlyPipelineConfig();
+    DocPipeline pipeline(cfg);
+    DocPipelineTestAccess::setOcrHooks(
+        pipeline,
+        [&fake](const cv::Mat& img, int64_t id) { return fake.push(img, id); },
+        [&fake](std::vector<ocr::PipelineOCRResult>& out, int64_t& id, bool& success) {
+            return fake.fetch(out, id, success);
+        });
+    DocPipelineTestAccess::setOcrTimeout(pipeline, std::chrono::milliseconds(200));
+
+    cv::Mat crop(8, 8, CV_8UC3, cv::Scalar::all(255));
+    std::string result100;
+    std::string result200;
+
+    std::thread first([&]() {
+        result100 = DocPipelineTestAccess::ocrOnCrop(pipeline, crop, 100);
+    });
+    std::thread second([&]() {
+        result200 = DocPipelineTestAccess::ocrOnCrop(pipeline, crop, 200);
+    });
+    first.join();
+    second.join();
+
+    EXPECT_EQ(result100, "result-for-100");
+    EXPECT_EQ(result200, "result-for-200");
+}
+
+TEST(Phase1Integration, handle_process_uses_request_unique_output_dir) {
+    const std::filesystem::path pdfPath =
+        std::filesystem::path(PROJECT_ROOT_DIR) / "test_files" / "BVRC_Meeting_Minutes_2024-04_origin.pdf";
+    if (!std::filesystem::exists(pdfPath)) {
+        GTEST_SKIP() << "Missing fixture PDF: " << pdfPath;
+    }
+
+    ServerConfig serverCfg;
+    serverCfg.uploadDir = (std::filesystem::path(PROJECT_ROOT_DIR) / "test" / "fixtures" / "server_output").string();
+    serverCfg.pipelineConfig = makePdfOnlyPipelineConfig();
+    serverCfg.numWorkers = 2;
+
+    DocServer server(serverCfg);
+    const std::string bytes = readFileBytes(pdfPath);
+    ASSERT_FALSE(bytes.empty());
+
+    const json first = json::parse(DocServerTestAccess::handleProcess(
+        server, bytes, pdfPath.filename().string()));
+    const json second = json::parse(DocServerTestAccess::handleProcess(
+        server, bytes, pdfPath.filename().string()));
+
+    ASSERT_TRUE(first.contains("output_dir"));
+    ASSERT_TRUE(second.contains("output_dir"));
+    EXPECT_NE(first["output_dir"].get<std::string>(), second["output_dir"].get<std::string>());
+}
+
+TEST(Phase1Integration, concurrent_handle_process_stats_are_request_local) {
+    const std::filesystem::path multiPdfPath =
+        std::filesystem::path(PROJECT_ROOT_DIR) / "test_files" / "BVRC_Meeting_Minutes_2024-04_origin.pdf";
+    const std::filesystem::path singlePdfPath =
+        std::filesystem::path(PROJECT_ROOT_DIR) / "test_files" / "small_ocr_origin.pdf";
+    if (!std::filesystem::exists(multiPdfPath) || !std::filesystem::exists(singlePdfPath)) {
+        GTEST_SKIP() << "Missing PDF fixtures: " << multiPdfPath << " or " << singlePdfPath;
+    }
+
+    ServerConfig serverCfg;
+    serverCfg.uploadDir = (std::filesystem::path(PROJECT_ROOT_DIR) / "test" / "fixtures" / "server_output").string();
+    serverCfg.pipelineConfig = makePdfOnlyPipelineConfig();
+    serverCfg.numWorkers = 2;
+
+    DocServer server(serverCfg);
+    const std::string multiBytes = readFileBytes(multiPdfPath);
+    const std::string singleBytes = readFileBytes(singlePdfPath);
+    ASSERT_FALSE(multiBytes.empty());
+    ASSERT_FALSE(singleBytes.empty());
+
+    auto singleFuture = std::async(std::launch::async, [&]() {
+        return json::parse(DocServerTestAccess::handleProcess(
+            server, singleBytes, singlePdfPath.filename().string()));
+    });
+    auto multiFuture = std::async(std::launch::async, [&]() {
+        return json::parse(DocServerTestAccess::handleProcess(
+            server, multiBytes, multiPdfPath.filename().string()));
+    });
+
+    const json singleResp = singleFuture.get();
+    const json multiResp = multiFuture.get();
+
+    ASSERT_TRUE(singleResp.contains("stats"));
+    ASSERT_TRUE(multiResp.contains("stats"));
+    ASSERT_TRUE(singleResp.contains("content_list"));
+    ASSERT_TRUE(multiResp.contains("content_list"));
+    ASSERT_TRUE(singleResp["content_list"].is_array());
+    ASSERT_TRUE(multiResp["content_list"].is_array());
+
+    const int singlePages = singleResp.value("pages", 0);
+    const int multiPages = multiResp.value("pages", 0);
+    EXPECT_EQ(singleResp.value("total_pages", 0), singlePages);
+    EXPECT_EQ(multiResp.value("total_pages", 0), multiPages);
+    EXPECT_EQ(static_cast<int>(singleResp["content_list"].size()), singlePages);
+    EXPECT_EQ(static_cast<int>(multiResp["content_list"].size()), multiPages);
+    EXPECT_GT(singlePages, 0);
+    EXPECT_GT(multiPages, 0);
+    EXPECT_NE(singlePages, multiPages);
+
+    EXPECT_TRUE(singleResp["stats"].contains("npu_lock_wait_ms"));
+    EXPECT_TRUE(singleResp["stats"].contains("npu_lock_hold_ms"));
+    EXPECT_TRUE(multiResp["stats"].contains("npu_lock_wait_ms"));
+    EXPECT_TRUE(multiResp["stats"].contains("npu_lock_hold_ms"));
+    EXPECT_GE(singleResp["stats"].value("npu_lock_wait_ms", -1.0), 0.0);
+    EXPECT_GE(singleResp["stats"].value("npu_lock_hold_ms", -1.0), 0.0);
+    EXPECT_GE(multiResp["stats"].value("npu_lock_wait_ms", -1.0), 0.0);
+    EXPECT_GE(multiResp["stats"].value("npu_lock_hold_ms", -1.0), 0.0);
+
+    ASSERT_TRUE(singleResp.contains("output_dir"));
+    ASSERT_TRUE(multiResp.contains("output_dir"));
+    EXPECT_NE(singleResp["output_dir"].get<std::string>(), multiResp["output_dir"].get<std::string>());
 }
 
 TEST(Phase1Integration, table_model_missing_is_fail_fast) {

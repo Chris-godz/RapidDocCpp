@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
+#include <future>
 #include <string>
 #include <thread>
 
@@ -267,6 +268,258 @@ TEST_F(FileParseHttpIntegrationTest, file_parse_returns_clear_error_when_file_mi
     ASSERT_FALSE(payload.is_discarded()) << res.body;
     ASSERT_TRUE(payload.contains("error"));
     EXPECT_EQ(payload["error"], "No files provided");
+}
+
+TEST_F(FileParseHttpIntegrationTest, file_parse_page_range_does_not_leak_between_requests) {
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(port_) + "/file_parse";
+
+    const std::string firstCmd =
+        "curl -sS --max-time 90 -X POST "
+        "-F " + shellEscape("files=@" + kMultiPagePdf + ";type=application/pdf") + " "
+        "-F " + shellEscape("return_content_list=true") + " "
+        "-F " + shellEscape("clear_output_file=true") + " "
+        "-F " + shellEscape("start_page_id=0") + " "
+        "-F " + shellEscape("end_page_id=0") + " "
+        + shellEscape(url);
+    const CurlResponse firstRes = runCurlWithStatus(firstCmd);
+    ASSERT_EQ(firstRes.exitCode, 0) << firstRes.rawOutput;
+    ASSERT_EQ(firstRes.httpCode, 200) << firstRes.body;
+
+    const json firstPayload = json::parse(firstRes.body, nullptr, false);
+    ASSERT_FALSE(firstPayload.is_discarded()) << firstRes.body;
+    ASSERT_TRUE(firstPayload.contains("results"));
+    ASSERT_EQ(firstPayload["results"].size(), 1u);
+
+    const auto& firstResult = firstPayload["results"][0];
+    ASSERT_TRUE(firstResult.contains("stats"));
+    const int firstPages = firstResult["stats"].value("pages", 0);
+    const int firstTotalPages = firstResult["stats"].value("total_pages", 0);
+    EXPECT_EQ(firstPages, 1);
+    EXPECT_EQ(firstTotalPages, 1);
+    ASSERT_TRUE(firstResult.contains("content_list"));
+    ASSERT_TRUE(firstResult["content_list"].is_array());
+    EXPECT_EQ(static_cast<int>(firstResult["content_list"].size()), 1);
+
+    const std::string secondCmd =
+        "curl -sS --max-time 90 -X POST "
+        "-F " + shellEscape("files=@" + kMultiPagePdf + ";type=application/pdf") + " "
+        "-F " + shellEscape("return_content_list=true") + " "
+        "-F " + shellEscape("clear_output_file=true") + " "
+        + shellEscape(url);
+    const CurlResponse secondRes = runCurlWithStatus(secondCmd);
+    ASSERT_EQ(secondRes.exitCode, 0) << secondRes.rawOutput;
+    ASSERT_EQ(secondRes.httpCode, 200) << secondRes.body;
+
+    const json secondPayload = json::parse(secondRes.body, nullptr, false);
+    ASSERT_FALSE(secondPayload.is_discarded()) << secondRes.body;
+    ASSERT_TRUE(secondPayload.contains("results"));
+    ASSERT_EQ(secondPayload["results"].size(), 1u);
+
+    const auto& secondResult = secondPayload["results"][0];
+    ASSERT_TRUE(secondResult.contains("stats"));
+    const int secondPages = secondResult["stats"].value("pages", 0);
+    const int secondTotalPages = secondResult["stats"].value("total_pages", 0);
+    EXPECT_GE(secondPages, 2);
+    EXPECT_EQ(secondTotalPages, secondPages);
+    EXPECT_GT(secondPages, firstPages);
+    ASSERT_TRUE(secondResult.contains("content_list"));
+    ASSERT_TRUE(secondResult["content_list"].is_array());
+    EXPECT_EQ(static_cast<int>(secondResult["content_list"].size()), secondPages);
+}
+
+TEST_F(FileParseHttpIntegrationTest, file_parse_concurrent_page_range_contract) {
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(port_) + "/file_parse";
+
+    const std::string rangedCmd =
+        "curl -sS --max-time 90 -X POST "
+        "-F " + shellEscape("files=@" + kMultiPagePdf + ";type=application/pdf") + " "
+        "-F " + shellEscape("return_content_list=true") + " "
+        "-F " + shellEscape("clear_output_file=true") + " "
+        "-F " + shellEscape("start_page_id=0") + " "
+        "-F " + shellEscape("end_page_id=0") + " "
+        + shellEscape(url);
+    const std::string fullCmd =
+        "curl -sS --max-time 90 -X POST "
+        "-F " + shellEscape("files=@" + kMultiPagePdf + ";type=application/pdf") + " "
+        "-F " + shellEscape("return_content_list=true") + " "
+        "-F " + shellEscape("clear_output_file=true") + " "
+        + shellEscape(url);
+
+    auto rangedFuture = std::async(std::launch::async, [&]() {
+        return runCurlWithStatus(rangedCmd);
+    });
+    auto fullFuture = std::async(std::launch::async, [&]() {
+        return runCurlWithStatus(fullCmd);
+    });
+
+    const CurlResponse rangedRes = rangedFuture.get();
+    const CurlResponse fullRes = fullFuture.get();
+
+    ASSERT_EQ(rangedRes.exitCode, 0) << rangedRes.rawOutput;
+    ASSERT_EQ(rangedRes.httpCode, 200) << rangedRes.body;
+    ASSERT_EQ(fullRes.exitCode, 0) << fullRes.rawOutput;
+    ASSERT_EQ(fullRes.httpCode, 200) << fullRes.body;
+
+    const json rangedPayload = json::parse(rangedRes.body, nullptr, false);
+    const json fullPayload = json::parse(fullRes.body, nullptr, false);
+    ASSERT_FALSE(rangedPayload.is_discarded()) << rangedRes.body;
+    ASSERT_FALSE(fullPayload.is_discarded()) << fullRes.body;
+
+    ASSERT_TRUE(rangedPayload.contains("results"));
+    ASSERT_TRUE(fullPayload.contains("results"));
+    ASSERT_EQ(rangedPayload["results"].size(), 1u);
+    ASSERT_EQ(fullPayload["results"].size(), 1u);
+
+    const auto& rangedResult = rangedPayload["results"][0];
+    const auto& fullResult = fullPayload["results"][0];
+    ASSERT_TRUE(rangedResult.contains("stats"));
+    ASSERT_TRUE(fullResult.contains("stats"));
+    ASSERT_TRUE(rangedResult.contains("content_list"));
+    ASSERT_TRUE(fullResult.contains("content_list"));
+    ASSERT_TRUE(rangedResult["content_list"].is_array());
+    ASSERT_TRUE(fullResult["content_list"].is_array());
+
+    const int rangedPages = rangedResult["stats"].value("pages", 0);
+    const int fullPages = fullResult["stats"].value("pages", 0);
+    EXPECT_EQ(rangedPages, 1);
+    EXPECT_GE(fullPages, 2);
+    EXPECT_EQ(static_cast<int>(rangedResult["content_list"].size()), rangedPages);
+    EXPECT_EQ(static_cast<int>(fullResult["content_list"].size()), fullPages);
+
+    EXPECT_TRUE(rangedResult["stats"].contains("npu_lock_wait_ms"));
+    EXPECT_TRUE(rangedResult["stats"].contains("npu_lock_hold_ms"));
+    EXPECT_TRUE(fullResult["stats"].contains("npu_lock_wait_ms"));
+    EXPECT_TRUE(fullResult["stats"].contains("npu_lock_hold_ms"));
+    EXPECT_GE(rangedResult["stats"].value("npu_lock_wait_ms", -1.0), 0.0);
+    EXPECT_GE(rangedResult["stats"].value("npu_lock_hold_ms", -1.0), 0.0);
+    EXPECT_GE(fullResult["stats"].value("npu_lock_wait_ms", -1.0), 0.0);
+    EXPECT_GE(fullResult["stats"].value("npu_lock_hold_ms", -1.0), 0.0);
+}
+
+TEST_F(FileParseHttpIntegrationTest, file_parse_concurrent_output_dir_unique_and_cleanup_isolated) {
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(port_) + "/file_parse";
+
+    const std::string cmd =
+        "curl -sS --max-time 90 -X POST "
+        "-F " + shellEscape("files=@" + kMultiPagePdf + ";type=application/pdf") + " "
+        "-F " + shellEscape("return_content_list=true") + " "
+        "-F " + shellEscape("clear_output_file=true") + " "
+        + shellEscape(url);
+
+    auto firstFuture = std::async(std::launch::async, [&]() {
+        return runCurlWithStatus(cmd);
+    });
+    auto secondFuture = std::async(std::launch::async, [&]() {
+        return runCurlWithStatus(cmd);
+    });
+
+    const CurlResponse firstRes = firstFuture.get();
+    const CurlResponse secondRes = secondFuture.get();
+    ASSERT_EQ(firstRes.exitCode, 0) << firstRes.rawOutput;
+    ASSERT_EQ(secondRes.exitCode, 0) << secondRes.rawOutput;
+    ASSERT_EQ(firstRes.httpCode, 200) << firstRes.body;
+    ASSERT_EQ(secondRes.httpCode, 200) << secondRes.body;
+
+    const json firstPayload = json::parse(firstRes.body, nullptr, false);
+    const json secondPayload = json::parse(secondRes.body, nullptr, false);
+    ASSERT_FALSE(firstPayload.is_discarded()) << firstRes.body;
+    ASSERT_FALSE(secondPayload.is_discarded()) << secondRes.body;
+    ASSERT_TRUE(firstPayload.contains("results"));
+    ASSERT_TRUE(secondPayload.contains("results"));
+    ASSERT_EQ(firstPayload["results"].size(), 1u);
+    ASSERT_EQ(secondPayload["results"].size(), 1u);
+
+    const std::string firstOutputDir =
+        firstPayload["results"][0].value("output_dir", "");
+    const std::string secondOutputDir =
+        secondPayload["results"][0].value("output_dir", "");
+    ASSERT_FALSE(firstOutputDir.empty());
+    ASSERT_FALSE(secondOutputDir.empty());
+    EXPECT_NE(firstOutputDir, secondOutputDir);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_FALSE(std::filesystem::exists(firstOutputDir));
+    EXPECT_FALSE(std::filesystem::exists(secondOutputDir));
+}
+
+TEST_F(FileParseHttpIntegrationTest, status_reports_pipeline_lock_observability) {
+    const std::string parseUrl =
+        "http://127.0.0.1:" + std::to_string(port_) + "/file_parse";
+    const std::string parseCmd =
+        "curl -sS --max-time 90 -X POST "
+        "-F " + shellEscape("files=@" + kMultiPagePdf + ";type=application/pdf") + " "
+        "-F " + shellEscape("clear_output_file=true") + " "
+        + shellEscape(parseUrl);
+    const CurlResponse parseRes = runCurlWithStatus(parseCmd);
+    ASSERT_EQ(parseRes.exitCode, 0) << parseRes.rawOutput;
+    ASSERT_EQ(parseRes.httpCode, 200) << parseRes.body;
+
+    const std::string statusUrl =
+        "http://127.0.0.1:" + std::to_string(port_) + "/status";
+    const CurlResponse statusRes = runCurlWithStatus(
+        "curl -sS --max-time 30 " + shellEscape(statusUrl));
+    ASSERT_EQ(statusRes.exitCode, 0) << statusRes.rawOutput;
+    ASSERT_EQ(statusRes.httpCode, 200) << statusRes.body;
+
+    const json status = json::parse(statusRes.body, nullptr, false);
+    ASSERT_FALSE(status.is_discarded()) << statusRes.body;
+    ASSERT_TRUE(status.contains("pipeline_lock"));
+    ASSERT_TRUE(status["pipeline_lock"].is_object());
+    ASSERT_TRUE(status["pipeline_lock"].contains("samples"));
+    EXPECT_GE(status["pipeline_lock"].value("samples", 0), 1);
+    ASSERT_TRUE(status["pipeline_lock"].contains("wait_total_ms"));
+    ASSERT_TRUE(status["pipeline_lock"].contains("hold_total_ms"));
+    EXPECT_GE(status["pipeline_lock"].value("wait_total_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_lock"].value("hold_total_ms", -1.0), 0.0);
+}
+
+TEST_F(FileParseHttpIntegrationTest, file_parse_concurrent_error_does_not_poison_followup) {
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(port_) + "/file_parse";
+    const std::string goodCmd =
+        "curl -sS --max-time 90 -X POST "
+        "-F " + shellEscape("files=@" + kMultiPagePdf + ";type=application/pdf") + " "
+        "-F " + shellEscape("return_content_list=true") + " "
+        "-F " + shellEscape("clear_output_file=true") + " "
+        + shellEscape(url);
+    const std::string badCmd =
+        "curl -sS --max-time 30 -X POST "
+        "-F " + shellEscape("return_content_list=true") + " "
+        + shellEscape(url);
+
+    auto badFuture = std::async(std::launch::async, [&]() {
+        return runCurlWithStatus(badCmd);
+    });
+    auto goodFuture = std::async(std::launch::async, [&]() {
+        return runCurlWithStatus(goodCmd);
+    });
+
+    const CurlResponse badRes = badFuture.get();
+    const CurlResponse goodRes = goodFuture.get();
+
+    ASSERT_EQ(badRes.exitCode, 0) << badRes.rawOutput;
+    ASSERT_EQ(badRes.httpCode, 400) << badRes.body;
+    ASSERT_EQ(goodRes.exitCode, 0) << goodRes.rawOutput;
+    ASSERT_EQ(goodRes.httpCode, 200) << goodRes.body;
+
+    const json goodPayload = json::parse(goodRes.body, nullptr, false);
+    ASSERT_FALSE(goodPayload.is_discarded()) << goodRes.body;
+    ASSERT_TRUE(goodPayload.contains("results"));
+    ASSERT_EQ(goodPayload["results"].size(), 1u);
+    EXPECT_GE(goodPayload["results"][0]["stats"].value("pages", 0), 2);
+
+    const CurlResponse followupRes = runCurlWithStatus(goodCmd);
+    ASSERT_EQ(followupRes.exitCode, 0) << followupRes.rawOutput;
+    ASSERT_EQ(followupRes.httpCode, 200) << followupRes.body;
+
+    const json followupPayload = json::parse(followupRes.body, nullptr, false);
+    ASSERT_FALSE(followupPayload.is_discarded()) << followupRes.body;
+    ASSERT_TRUE(followupPayload.contains("results"));
+    ASSERT_EQ(followupPayload["results"].size(), 1u);
+    EXPECT_GE(followupPayload["results"][0]["stats"].value("pages", 0), 2);
 }
 
 } // namespace

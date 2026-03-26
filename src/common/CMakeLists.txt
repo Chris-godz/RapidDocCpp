@@ -1,6 +1,7 @@
 add_library(doc_common STATIC
     types.cpp
     config.cpp
+    perf_utils.cpp
 )
 
 target_include_directories(doc_common PUBLIC

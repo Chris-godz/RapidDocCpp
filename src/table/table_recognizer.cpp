@@ -713,58 +713,143 @@ std::string TableRecognizer::generateHtml(const std::vector<TableCell>& cells) {
 // recognize — full pipeline
 // ============================================================================
 TableResult TableRecognizer::recognize(const cv::Mat& tableImage) {
-    TableResult result;
+    const NpuStageResult npuStage = recognizeNpuStage(tableImage);
+    return finalizeRecognizePostprocess(tableImage, npuStage);
+}
+
+TableRecognizer::NpuStageResult TableRecognizer::recognizeNpuStage(const cv::Mat& tableImage) {
+    NpuStageResult npuStage;
+    auto tStart = std::chrono::steady_clock::now();
+
     if (tableImage.empty()) {
-        result.type = TableType::UNKNOWN;
-        result.supported = false;
-        return result;
+        npuStage.type = TableType::UNKNOWN;
+        npuStage.supported = false;
+        npuStage.npuStageTimeMs = 0.0;
+        return npuStage;
     }
 
-    result.type = estimateTableType(tableImage);
-    if (result.type == TableType::WIRELESS) {
-        result.supported = false;
-        return result;
+    auto estimateStart = std::chrono::steady_clock::now();
+    npuStage.type = estimateTableType(tableImage);
+    auto estimateEnd = std::chrono::steady_clock::now();
+    npuStage.estimateTableTypeMs =
+        std::chrono::duration<double, std::milli>(estimateEnd - estimateStart).count();
+
+    if (npuStage.type == TableType::WIRELESS) {
+        npuStage.supported = false;
+        auto tEnd = std::chrono::steady_clock::now();
+        npuStage.npuStageTimeMs =
+            std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+        return npuStage;
     }
 
     if (!initialized_) {
         LOG_ERROR("Table recognizer not initialized");
-        result.supported = false;
-        return result;
+        npuStage.supported = false;
+        auto tEnd = std::chrono::steady_clock::now();
+        npuStage.npuStageTimeMs =
+            std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+        return npuStage;
     }
 
-    auto tStart = std::chrono::steady_clock::now();
-
-    int origH = tableImage.rows, origW = tableImage.cols;
+    npuStage.origH = tableImage.rows;
+    npuStage.origW = tableImage.cols;
     int targetSize = config_.inputSize;
-    float scale = static_cast<float>(targetSize) / std::max(origH, origW);
-    int padTop = (targetSize - static_cast<int>(origH * scale)) / 2;
-    int padLeft = (targetSize - static_cast<int>(origW * scale)) / 2;
+    npuStage.scale = static_cast<float>(targetSize) / std::max(npuStage.origH, npuStage.origW);
+    npuStage.padTop = (targetSize - static_cast<int>(npuStage.origH * npuStage.scale)) / 2;
+    npuStage.padLeft = (targetSize - static_cast<int>(npuStage.origW * npuStage.scale)) / 2;
 
-    // Preprocess
+    auto preprocessStart = std::chrono::steady_clock::now();
     cv::Mat preprocessed = preprocess(tableImage);
+    auto preprocessEnd = std::chrono::steady_clock::now();
+    npuStage.preprocessMs =
+        std::chrono::duration<double, std::milli>(preprocessEnd - preprocessStart).count();
 
-    // DX Engine inference
+    auto dxRunStart = std::chrono::steady_clock::now();
     auto dxOutputs = impl_->dxEngine->Run(static_cast<void*>(preprocessed.data));
+    auto dxRunEnd = std::chrono::steady_clock::now();
+    npuStage.dxRunMs =
+        std::chrono::duration<double, std::milli>(dxRunEnd - dxRunStart).count();
+
     auto& outTensor = dxOutputs[0];
-    int maskH = targetSize, maskW = targetSize;
+    int maskH = targetSize;
+    int maskW = targetSize;
     auto& outShape = outTensor->shape();
     if (outShape.size() >= 2) {
         maskH = static_cast<int>(outShape[outShape.size() - 2]);
         maskW = static_cast<int>(outShape[outShape.size() - 1]);
     }
 
+    auto maskDecodeStart = std::chrono::steady_clock::now();
     const int64_t* rawPtr = reinterpret_cast<const int64_t*>(outTensor->data());
-    cv::Mat mask(maskH, maskW, CV_8UC1);
-    for (int i = 0; i < maskH * maskW; ++i)
-        mask.data[i] = static_cast<uint8_t>(rawPtr[i]);
+    npuStage.mask = cv::Mat(maskH, maskW, CV_8UC1);
+    for (int i = 0; i < maskH * maskW; ++i) {
+        npuStage.mask.data[i] = static_cast<uint8_t>(rawPtr[i]);
+    }
+    auto maskDecodeEnd = std::chrono::steady_clock::now();
+    npuStage.maskDecodeMs =
+        std::chrono::duration<double, std::milli>(maskDecodeEnd - maskDecodeStart).count();
 
-    // Full postprocess (aligned with Python)
-    result.cells = postprocessDxEngine(tableImage, mask, scale, padTop, padLeft, origH, origW);
-    result.supported = true;
-
+    npuStage.supported = true;
     auto tEnd = std::chrono::steady_clock::now();
-    result.inferenceTimeMs = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
-    LOG_INFO("Table recognition: {} cells in {:.1f}ms", result.cells.size(), result.inferenceTimeMs);
+    npuStage.npuStageTimeMs =
+        std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+    return npuStage;
+}
+
+TableResult TableRecognizer::finalizeRecognizePostprocess(
+    const cv::Mat& tableImage,
+    const NpuStageResult& npuStage)
+{
+    TableResult result;
+    result.type = npuStage.type;
+
+    if (tableImage.empty()) {
+        result.supported = false;
+        return result;
+    }
+
+    if (!npuStage.supported) {
+        result.supported = false;
+        result.inferenceTimeMs = npuStage.npuStageTimeMs;
+        if (result.type == TableType::WIRELESS) {
+            LOG_INFO(
+                "Table recognize profile (wireless fallback): total={:.2f}ms "
+                "estimate_table_type={:.2f}ms",
+                result.inferenceTimeMs,
+                npuStage.estimateTableTypeMs);
+        }
+        return result;
+    }
+
+    auto postprocessStart = std::chrono::steady_clock::now();
+    result.cells = postprocessDxEngine(
+        tableImage,
+        npuStage.mask,
+        npuStage.scale,
+        npuStage.padTop,
+        npuStage.padLeft,
+        npuStage.origH,
+        npuStage.origW);
+    auto postprocessEnd = std::chrono::steady_clock::now();
+    const double postprocessMs =
+        std::chrono::duration<double, std::milli>(postprocessEnd - postprocessStart).count();
+
+    result.supported = true;
+    result.inferenceTimeMs = npuStage.npuStageTimeMs + postprocessMs;
+
+    LOG_INFO(
+        "Table recognition: {} cells in {:.1f}ms",
+        result.cells.size(),
+        result.inferenceTimeMs);
+    LOG_INFO(
+        "Table recognize profile: total={:.2f}ms estimate_table_type={:.2f}ms "
+        "preprocess={:.2f}ms dx_run={:.2f}ms mask_decode={:.2f}ms postprocess={:.2f}ms",
+        result.inferenceTimeMs,
+        npuStage.estimateTableTypeMs,
+        npuStage.preprocessMs,
+        npuStage.dxRunMs,
+        npuStage.maskDecodeMs,
+        postprocessMs);
     return result;
 }
 

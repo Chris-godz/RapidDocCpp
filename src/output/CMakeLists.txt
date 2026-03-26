@@ -1,6 +1,7 @@
 add_library(doc_output STATIC
     markdown_writer.cpp
     content_list.cpp
+    detail_report.cpp
 )
 
 target_include_directories(doc_output PUBLIC

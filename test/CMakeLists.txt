@@ -20,6 +20,8 @@ target_link_libraries(test_utils PUBLIC
 # ========================================
 add_executable(rapiddoc_tests
     test_metrics.cpp
+    test_perf_utils.cpp
+    test_detail_report.cpp
 )
 
 target_include_directories(rapiddoc_tests PRIVATE
@@ -30,6 +32,7 @@ target_include_directories(rapiddoc_tests PRIVATE
 target_link_libraries(rapiddoc_tests PRIVATE
     gtest_main
     test_utils
+    doc_output
 )
 
 add_test(NAME MetricsTests COMMAND rapiddoc_tests)
@@ -138,6 +141,31 @@ if(HAS_DXNN_OCR)
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
         )
 
+        add_executable(rapid_doc_npu_test_server
+            http_npu_test_server_main.cpp
+        )
+
+        target_include_directories(rapid_doc_npu_test_server PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/3rd-party/json/include
+            ${PROJECT_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/include
+        )
+
+        target_compile_definitions(rapid_doc_npu_test_server PRIVATE
+            PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}"
+        )
+
+        target_link_libraries(rapid_doc_npu_test_server PRIVATE
+            doc_server
+            doc_pipeline
+            spdlog::spdlog
+        )
+
+        set_target_properties(rapid_doc_npu_test_server PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        )
+
         add_executable(rapiddoc_integration_tests
             test_phase1_integration.cpp
             test_phase1_http_integration.cpp
@@ -169,6 +197,37 @@ if(HAS_DXNN_OCR)
         add_dependencies(rapiddoc_integration_tests rapid_doc_test_server)
 
         add_test(NAME Phase1IntegrationTests COMMAND rapiddoc_integration_tests)
+
+        add_executable(rapiddoc_npu_concurrency_tests
+            test_phase2_npu_concurrency.cpp
+        )
+
+        target_include_directories(rapiddoc_npu_concurrency_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${PROJECT_SOURCE_DIR}/include
+            ${PROJECT_SOURCE_DIR}/3rd-party/json/include
+            ${PROJECT_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/include
+        )
+
+        target_compile_definitions(rapiddoc_npu_concurrency_tests PRIVATE
+            PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}"
+            RAPIDDOC_BUILD_DIR="${PROJECT_BINARY_DIR}"
+        )
+
+        if(TARGET rapiddoc_opencv_libs)
+            set(_npu_integration_ocv_libs rapiddoc_opencv_libs)
+        else()
+            set(_npu_integration_ocv_libs ${OpenCV_LIBS})
+        endif()
+        target_link_libraries(rapiddoc_npu_concurrency_tests PRIVATE
+            gtest_main
+            doc_pipeline
+            doc_server
+            ${_npu_integration_ocv_libs}
+        )
+        add_dependencies(rapiddoc_npu_concurrency_tests rapid_doc_npu_test_server)
+
+        add_test(NAME NpuConcurrencyIntegrationTests COMMAND rapiddoc_npu_concurrency_tests)
     endif()
 
     add_executable(rapiddoc_e2e_tests

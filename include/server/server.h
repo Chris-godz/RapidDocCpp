@@ -14,6 +14,7 @@
 #include <functional>
 #include <atomic>
 #include <mutex>
+#include <cstdint>
 
 namespace rapid_doc {
 
@@ -76,12 +77,22 @@ private:
     std::atomic<uint64_t> requestCount_{0};
     std::atomic<uint64_t> successCount_{0};
     std::atomic<uint64_t> errorCount_{0};
+    // Serializes NPU-bound pipeline inference calls only.
+    // HTTP parsing, file I/O, and JSON serialization run outside this lock.
     std::mutex pipelineMutex_;
+    std::atomic<uint64_t> lockSamples_{0};
+    std::atomic<uint64_t> lockWaitUsTotal_{0};
+    std::atomic<uint64_t> lockHoldUsTotal_{0};
+    std::atomic<uint64_t> lockWaitUsMax_{0};
+    std::atomic<uint64_t> lockHoldUsMax_{0};
+    std::atomic<uint64_t> npuStageUsTotal_{0};
+    std::atomic<uint64_t> cpuStageUsTotal_{0};
 
     // Internal handlers
     void setupRoutes();
     std::string handleProcess(const std::string& pdfData, const std::string& filename);
     std::string buildStatusJson();
+    void recordPipelineLockStats(const DocumentResult& result);
 };
 
 } // namespace rapid_doc

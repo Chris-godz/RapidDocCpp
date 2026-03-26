@@ -33,17 +33,38 @@
 #include <vector>
 #include <atomic>
 #include <chrono>
+#include <optional>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace rapid_doc {
 
 class DocPipelineTestAccess;
+class DocServer;
 
 /**
  * @brief Progress callback for pipeline stages
  */
 using ProgressCallback = std::function<void(const std::string& stage, int current, int total)>;
+
+/**
+ * @brief Per-request runtime/stage overrides for one pipeline execution.
+ *
+ * These overrides are merged onto the pipeline's base config and do not mutate
+ * shared pipeline configuration state.
+ */
+struct PipelineRunOverrides {
+    std::optional<std::string> outputDir;
+    std::optional<bool> saveImages;
+    std::optional<bool> saveVisualization;
+    std::optional<int> startPageId;
+    std::optional<int> endPageId;
+    std::optional<int> maxPages;
+    std::optional<bool> enableFormula;
+    std::optional<bool> enableWiredTable;
+    std::optional<bool> enableMarkdownOutput;
+};
 
 /**
  * @brief Main document processing pipeline
@@ -65,6 +86,9 @@ public:
      * @return Complete document result
      */
     DocumentResult processPdf(const std::string& pdfPath);
+    DocumentResult processPdfWithOverrides(
+        const std::string& pdfPath,
+        const PipelineRunOverrides& overrides);
 
     /**
      * @brief Process a PDF from memory
@@ -73,6 +97,10 @@ public:
      * @return Complete document result
      */
     DocumentResult processPdfFromMemory(const uint8_t* data, size_t size);
+    DocumentResult processPdfFromMemoryWithOverrides(
+        const uint8_t* data,
+        size_t size,
+        const PipelineRunOverrides& overrides);
 
     /**
      * @brief Process a single image as a single-page document.
@@ -81,6 +109,10 @@ public:
      * @return Complete single-page document result
      */
     DocumentResult processImageDocument(const cv::Mat& image, int pageIndex = 0);
+    DocumentResult processImageDocumentWithOverrides(
+        const cv::Mat& image,
+        int pageIndex,
+        const PipelineRunOverrides& overrides);
 
     /**
      * @brief Process a single page image (no PDF rendering)
@@ -116,11 +148,18 @@ public:
 
 private:
     friend class DocPipelineTestAccess;
+    friend class DocServer;
+
+    struct ExecutionContext {
+        PipelineStages stages;
+        RuntimeConfig runtime;
+    };
 
     /**
      * @brief Process a single page through the pipeline
      */
     PageResult processPage(const PageImage& pageImage);
+    PageResult processPage(const PageImage& pageImage, const ExecutionContext& ctx);
 
     using OcrSubmitHook = std::function<bool(const cv::Mat&, int64_t)>;
     using OcrFetchHook = std::function<bool(
@@ -151,6 +190,12 @@ private:
         const std::vector<LayoutBox>& tableBoxes,
         int pageIndex
     );
+    std::vector<ContentElement> runTableRecognition(
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& tableBoxes,
+        int pageIndex,
+        const ExecutionContext& ctx
+    );
 
     /**
      * @brief Handle unsupported elements (formula, etc.)
@@ -170,6 +215,13 @@ private:
         int pageIndex,
         std::vector<ContentElement>& elements
     );
+    void saveExtractedImages(
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& figureBoxes,
+        int pageIndex,
+        std::vector<ContentElement>& elements,
+        const ExecutionContext& ctx
+    );
 
     void saveFormulaImages(
         const cv::Mat& image,
@@ -177,11 +229,24 @@ private:
         int pageIndex,
         std::vector<ContentElement>& elements
     );
+    void saveFormulaImages(
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& equationBoxes,
+        int pageIndex,
+        std::vector<ContentElement>& elements,
+        const ExecutionContext& ctx
+    );
 
     void saveLayoutVisualization(
         const cv::Mat& image,
         const LayoutResult& layoutResult,
         int pageIndex
+    );
+    void saveLayoutVisualization(
+        const cv::Mat& image,
+        const LayoutResult& layoutResult,
+        int pageIndex,
+        const ExecutionContext& ctx
     );
 
     /**
@@ -203,12 +268,25 @@ private:
     int64_t allocateOcrTaskId();
 
     TableResult recognizeTable(const cv::Mat& tableCrop);
+    TableRecognizer::NpuStageResult recognizeTableNpuStage(const cv::Mat& tableCrop);
+    TableResult finalizeTableRecognizePostprocess(
+        const cv::Mat& tableCrop,
+        const TableRecognizer::NpuStageResult& npuStage);
     std::string generateTableHtml(const std::vector<TableCell>& cells);
     ContentElement makeTableFallbackElement(
         const LayoutBox& box,
         int pageIndex,
         const std::string& reason) const;
     static std::string tableFallbackMessage(const std::string& reason);
+
+    ExecutionContext makeExecutionContext(const PipelineRunOverrides* overrides) const;
+    void resetOcrTransientStateForRun();
+    std::mutex& npuSerialMutex();
+    DocumentResult processPdfInternal(const std::string& pdfPath, const ExecutionContext& ctx);
+    DocumentResult processPdfFromMemoryInternal(
+        const uint8_t* data, size_t size, const ExecutionContext& ctx);
+    DocumentResult processImageDocumentInternal(
+        const cv::Mat& image, int pageIndex, const ExecutionContext& ctx);
 
     void reportProgress(const std::string& stage, int current, int total);
 
@@ -220,6 +298,8 @@ private:
     std::unique_ptr<LayoutDetector> layoutDetector_;
     std::unique_ptr<TableRecognizer> tableRecognizer_;
     std::unique_ptr<ocr::OCRPipeline> ocrPipeline_;
+    std::mutex npuSerialMutex_;
+    std::mutex* externalNpuSerialMutex_ = nullptr;
 
     OcrSubmitHook ocrSubmitHook_;
     OcrFetchHook ocrFetchHook_;
@@ -230,6 +310,7 @@ private:
         std::vector<ocr::PipelineOCRResult> results;
         bool success = false;
     };
+    mutable std::mutex ocrStateMutex_;
     std::unordered_map<int64_t, BufferedOcrResult> bufferedOcrResults_;
     std::unordered_set<int64_t> timedOutOcrTaskIds_;
     std::chrono::milliseconds ocrWaitTimeout_{30000};
