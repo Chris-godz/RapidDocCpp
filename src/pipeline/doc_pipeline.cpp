@@ -15,31 +15,12 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
-#include <type_traits>
 
 namespace fs = std::filesystem;
 
 namespace rapid_doc {
 
 namespace {
-
-template <typename T, typename = void>
-struct HasDeviceIdField : std::false_type {};
-
-template <typename T>
-struct HasDeviceIdField<T, std::void_t<decltype(std::declval<T&>().deviceId)>> : std::true_type {};
-
-template <typename T>
-void setDeviceAffinityIfSupported(T& config, int deviceId, const char* componentName) {
-    if constexpr (HasDeviceIdField<T>::value) {
-        config.deviceId = deviceId;
-    } else if (deviceId >= 0) {
-        LOG_WARN(
-            "{} config from current DEEPX-OCR baseline has no deviceId field; ignoring requested device {}",
-            componentName,
-            deviceId);
-    }
-}
 
 void finalizeDocumentStats(DocumentResult& result) {
     const double pdfRenderTimeMs = result.stats.pdfRenderTimeMs;
@@ -237,15 +218,12 @@ bool DocPipeline::initialize() {
     // Initialize OCR pipeline (from DXNN-OCR-cpp)
     if (config_.stages.enableOcr) {
         ocr::OCRPipelineConfig ocrCfg;
+        ocrCfg.deviceId = config_.runtime.deviceId;
 
         // Detection model paths — use only 640 model to conserve NPU memory
         ocrCfg.detectorConfig.model640Path = config_.models.ocrModelDir + "/det_v5_640.dxnn";
         ocrCfg.detectorConfig.model960Path = "";
         ocrCfg.detectorConfig.sizeThreshold = 99999;
-        setDeviceAffinityIfSupported(
-            ocrCfg.detectorConfig,
-            config_.runtime.deviceId,
-            "OCR detector");
 
         // Recognition model paths
         std::string mdir = config_.models.ocrModelDir;
@@ -258,10 +236,6 @@ bool DocPipeline::initialize() {
             {35, mdir + "/rec_v5_ratio_35.dxnn"},
         };
         ocrCfg.recognizerConfig.dictPath = config_.models.ocrDictPath;
-        setDeviceAffinityIfSupported(
-            ocrCfg.recognizerConfig,
-            config_.runtime.deviceId,
-            "OCR recognizer");
 
         // Disable heavy document-level preprocessing for per-region OCR
         ocrCfg.useDocPreprocessing = false;
