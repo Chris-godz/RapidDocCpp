@@ -11,6 +11,7 @@ option(BUILD_CLI "Build CLI application" ON)
 option(BUILD_SERVER "Build HTTP API server" ON)
 option(BUILD_TESTS "Build unit tests" OFF)
 option(BUILD_OPENCV_FROM_SOURCE "Build OpenCV from source (submodule)" ON)
+set(RAPIDDOC_BUILD_TESTS "${BUILD_TESTS}")
 
 # Set default build type to Release
 if(NOT CMAKE_BUILD_TYPE)
@@ -60,10 +61,12 @@ elseif(ENABLE_DEBUG_INFO)
     add_compile_options(-g -rdynamic -fno-omit-frame-pointer)
 endif()
 
-# ========================================
-# OpenCV Configuration (shared with DXNN-OCR-cpp)
-# ========================================
-include(cmake/BuildOpenCV.cmake)
+# Detect whether the OCR submodule is available before configuring shared dependencies.
+set(HAS_DXNN_OCR_SOURCE OFF)
+if(EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/CMakeLists.txt"
+   AND EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/src/pipeline/ocr_pipeline.cpp")
+    set(HAS_DXNN_OCR_SOURCE ON)
+endif()
 
 # ========================================
 # ONNX Runtime (for Layout post-processing)
@@ -94,10 +97,9 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_BACKUP}")
 # ========================================
 # DXNN-OCR-cpp as Subproject
 # ========================================
-set(DXNN_OCR_AS_SUBPROJECT ON CACHE BOOL "" FORCE)
-if(EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/CMakeLists.txt"
-   AND EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/src/pipeline/ocr_pipeline.cpp")
-    # DXNN uses parent's OpenCV (from source or system) via its BuildOpenCV when DXNN_OCR_AS_SUBPROJECT
+if(HAS_DXNN_OCR_SOURCE)
+    # Let the OCR subproject configure OpenCV exactly once for the whole tree.
+    set(DXNN_OCR_AS_SUBPROJECT ON CACHE BOOL "" FORCE)
     set(DXOCR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(BUILD_OCR_SERVER OFF CACHE BOOL "" FORCE)
     set(BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
@@ -109,9 +111,11 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/DXNN-OCR-cpp/CMakeLists.txt"
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/DXNN-OCR-cpp/src/classification/CMakeFiles/ocr_classification.dir")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/3rd-party/DXNN-OCR-cpp/src/preprocessing/CMakeFiles/ocr_preprocessing.dir")
 else()
+    include(cmake/BuildOpenCV.cmake)
     message(WARNING "DXNN-OCR-cpp submodule not initialized — skipping OCR pipeline")
     set(HAS_DXNN_OCR OFF)
 endif()
+set(BUILD_TESTS "${RAPIDDOC_BUILD_TESTS}" CACHE BOOL "Build unit tests" FORCE)
 
 # ========================================
 # Global Include Directories

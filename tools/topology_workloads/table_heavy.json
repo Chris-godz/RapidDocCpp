@@ -1,0 +1,13 @@
+[
+  {
+    "name": "table_heavy_doc",
+    "path": "test_files/表格0.pdf",
+    "fields": {
+      "return_md": "true",
+      "return_middle_json": "true",
+      "return_content_list": "true",
+      "clear_output_file": "true",
+      "table_enable": "true"
+    }
+  }
+]
