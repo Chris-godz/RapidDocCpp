@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 
 EXPECTED_MAIN_COMMIT = ""
-EXPECTED_OCR_COMMIT = "9f2362e752a46bd7c03dd604b793b0e8f99aa475"
+EXPECTED_OCR_COMMIT = "34cda458cddd8dbf708639cd0c8089804c5132d1"
 FORMAL_WORKLOADS = ["layout_ocr", "layout_ocr_table", "table_heavy"]
 FORMAL_ENV_PROFILE = {
     "CUSTOM_INTER_OP_THREADS_COUNT": "1",
