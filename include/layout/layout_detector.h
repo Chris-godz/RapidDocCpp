@@ -33,6 +33,7 @@ struct LayoutDetectorConfig {
     int inputSize = 640;            // Model input size (640 for pp_doclayout_l, 800 for pp_doclayout_plus_l)
     float confThreshold = 0.5f;     // Detection confidence threshold
     bool useAsync = false;          // Enable async inference
+    int deviceId = -1;              // DXRT device affinity (-1 = runtime default)
 };
 
 /**

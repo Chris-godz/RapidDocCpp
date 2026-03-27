@@ -161,11 +161,15 @@ void assertPerRequestMetricsPresent(const json& stats) {
     ASSERT_TRUE(stats.contains("npu_serial_ms"));
     ASSERT_TRUE(stats.contains("cpu_only_ms"));
     ASSERT_TRUE(stats.contains("pipeline_call_ms"));
+    ASSERT_TRUE(stats.contains("route_queue_ms"));
+    ASSERT_TRUE(stats.contains("lb_proxy_ms"));
     EXPECT_GE(stats.value("npu_lock_wait_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("npu_lock_hold_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("npu_serial_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("cpu_only_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("pipeline_call_ms", -1.0), 0.0);
+    EXPECT_GE(stats.value("route_queue_ms", -1.0), 0.0);
+    EXPECT_GE(stats.value("lb_proxy_ms", -1.0), 0.0);
 }
 
 class NpuConcurrencyHttpIntegrationTest : public ::testing::Test {
@@ -392,6 +396,10 @@ TEST_F(NpuConcurrencyHttpIntegrationTest, two_concurrent_requests_report_npu_loc
     ASSERT_TRUE(resultA.contains("output_dir"));
     ASSERT_TRUE(resultB.contains("output_dir"));
     EXPECT_NE(resultA["output_dir"].get<std::string>(), resultB["output_dir"].get<std::string>());
+    EXPECT_EQ(resultA.value("topology", ""), "single_pipeline");
+    EXPECT_EQ(resultB.value("topology", ""), "single_pipeline");
+    ASSERT_TRUE(resultA.contains("shard_id"));
+    ASSERT_TRUE(resultB.contains("shard_id"));
 
     const CurlResponse statusRes = runCurlWithStatus(
         "curl -sS --max-time 30 " + shellEscape(baseUrl() + "/status"));
@@ -399,6 +407,10 @@ TEST_F(NpuConcurrencyHttpIntegrationTest, two_concurrent_requests_report_npu_loc
     ASSERT_EQ(statusRes.httpCode, 200) << statusRes.body;
     const json status = json::parse(statusRes.body, nullptr, false);
     ASSERT_FALSE(status.is_discarded()) << statusRes.body;
+    ASSERT_TRUE(status.contains("topology"));
+    ASSERT_TRUE(status["topology"].is_object());
+    ASSERT_TRUE(status.contains("per_device"));
+    ASSERT_TRUE(status["per_device"].is_array());
     ASSERT_TRUE(status.contains("pipeline_lock"));
     ASSERT_TRUE(status["pipeline_lock"].contains("samples"));
     EXPECT_GE(status["pipeline_lock"].value("samples", 0), 2);

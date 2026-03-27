@@ -169,6 +169,7 @@ if(HAS_DXNN_OCR)
         add_executable(rapiddoc_integration_tests
             test_phase1_integration.cpp
             test_phase1_http_integration.cpp
+            test_topology_lb_integration.cpp
         )
 
         target_include_directories(rapiddoc_integration_tests PRIVATE
@@ -195,6 +196,7 @@ if(HAS_DXNN_OCR)
             ${_integration_ocv_libs}
         )
         add_dependencies(rapiddoc_integration_tests rapid_doc_test_server)
+        add_dependencies(rapiddoc_integration_tests rapid_doc_topology_lb)
 
         add_test(NAME Phase1IntegrationTests COMMAND rapiddoc_integration_tests)
 

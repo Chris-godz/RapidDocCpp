@@ -12,6 +12,7 @@
 #endif
 #include <crow.h>
 
+#include <dxrt/device_info_status.h>
 #include <nlohmann/json.hpp>
 #include <opencv2/imgcodecs.hpp>
 
@@ -23,12 +24,103 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
+#include <mutex>
 #include <optional>
 #include <sstream>
+#include <thread>
+#include <unordered_map>
+
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
 namespace rapid_doc {
+
+struct DeviceMetricSample {
+    int deviceId = -1;
+    uint64_t memoryTotalBytes = 0;
+    std::optional<uint64_t> memoryLastUsedBytes;
+    std::optional<uint64_t> memoryPeakUsedBytes;
+};
+
+class DeviceMetricsSampler {
+public:
+    explicit DeviceMetricsSampler(std::vector<int> deviceIds)
+        : deviceIds_(std::move(deviceIds))
+    {
+        sampleOnce();
+    }
+
+    ~DeviceMetricsSampler() {
+        stop();
+    }
+
+    void start() {
+        bool expected = false;
+        if (!running_.compare_exchange_strong(expected, true)) {
+            return;
+        }
+
+        worker_ = std::thread([this]() {
+            while (running_.load(std::memory_order_relaxed)) {
+                sampleOnce();
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+        });
+    }
+
+    void stop() {
+        bool expected = true;
+        if (!running_.compare_exchange_strong(expected, false)) {
+            return;
+        }
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    std::vector<DeviceMetricSample> snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<DeviceMetricSample> result;
+        result.reserve(samples_.size());
+        for (const auto& [deviceId, sample] : samples_) {
+            (void)deviceId;
+            result.push_back(sample);
+        }
+        std::sort(result.begin(), result.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.deviceId < rhs.deviceId;
+        });
+        return result;
+    }
+
+    std::string memoryTelemetryStatus() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return memoryTelemetryStatus_;
+    }
+
+private:
+    void sampleOnce() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (int deviceId : deviceIds_) {
+            try {
+                const auto status = dxrt::DeviceStatus::GetCurrentStatus(deviceId);
+                auto& sample = samples_[deviceId];
+                sample.deviceId = deviceId;
+                sample.memoryTotalBytes = static_cast<uint64_t>(status.MemorySize());
+            } catch (...) {
+                memoryTelemetryStatus_ = "blocked_memory_telemetry_unavailable";
+            }
+        }
+    }
+
+    std::vector<int> deviceIds_;
+    mutable std::mutex mutex_;
+    std::unordered_map<int, DeviceMetricSample> samples_;
+    std::string memoryTelemetryStatus_ = "blocked_memory_telemetry_unavailable";
+    std::atomic<bool> running_{false};
+    std::thread worker_;
+};
 
 namespace {
 
@@ -212,6 +304,28 @@ void updateAtomicMax(std::atomic<uint64_t>& target, uint64_t value) {
     }
 }
 
+std::vector<int> discoverDxrtDeviceIds() {
+    std::vector<int> ids;
+    try {
+        const int count = dxrt::DeviceStatus::GetDeviceCount();
+        for (int i = 0; i < count; ++i) {
+            ids.push_back(i);
+        }
+    } catch (...) {
+    }
+    return ids;
+}
+
+std::string makeServerId(const ServerConfig& config, const std::string& topology) {
+    if (!config.serverId.empty()) {
+        return config.serverId;
+    }
+
+    std::ostringstream out;
+    out << topology << "_pid" << ::getpid();
+    return out.str();
+}
+
 std::vector<uint8_t> base64Decode(const std::string& encoded) {
     static const std::string kBase64Chars =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -293,7 +407,19 @@ json getenvOrNull(const char* name) {
     return std::string(value);
 }
 
-json makeStatsJson(const DocumentResult& result, std::optional<double> pipelineCallMs = std::nullopt) {
+json maybeUIntToJson(const std::optional<uint64_t>& value) {
+    if (!value.has_value()) {
+        return nullptr;
+    }
+    return *value;
+}
+
+json makeStatsJson(
+    const DocumentResult& result,
+    std::optional<double> pipelineCallMs = std::nullopt,
+    std::optional<double> routeQueueMs = std::nullopt,
+    std::optional<double> lbProxyMs = std::nullopt)
+{
     json stats{
         {"pages", result.processedPages},
         {"total_pages", result.totalPages},
@@ -312,6 +438,12 @@ json makeStatsJson(const DocumentResult& result, std::optional<double> pipelineC
 
     if (pipelineCallMs.has_value()) {
         stats["pipeline_call_ms"] = *pipelineCallMs;
+    }
+    if (routeQueueMs.has_value()) {
+        stats["route_queue_ms"] = *routeQueueMs;
+    }
+    if (lbProxyMs.has_value()) {
+        stats["lb_proxy_ms"] = *lbProxyMs;
     }
     return stats;
 }
@@ -452,7 +584,7 @@ std::string makeRequestId() {
         std::chrono::system_clock::now().time_since_epoch()).count();
     const uint64_t id = counter.fetch_add(1, std::memory_order_relaxed);
     std::ostringstream out;
-    out << "req_" << nowMs << "_" << id;
+    out << "req_" << nowMs << "_pid" << ::getpid() << "_" << id;
     return out.str();
 }
 
@@ -539,6 +671,20 @@ struct ProcessedDocument {
     double prepareTimeMs = 0.0;
     double pipelineCallTimeMs = 0.0;
     double assemblyTimeMs = 0.0;
+};
+
+struct DispatchMetadata {
+    std::string topology = "single_pipeline";
+    int deviceId = -1;
+    std::string shardId;
+    std::string backendId;
+    double routeQueueMs = 0.0;
+    double lbProxyMs = 0.0;
+};
+
+struct RoutedProcessedDocument {
+    ProcessedDocument processed;
+    DispatchMetadata dispatch;
 };
 
 ProcessedDocument processDocumentBytes(
@@ -634,13 +780,25 @@ ProcessedDocument processDocumentBytes(
     return processed;
 }
 
-json buildFileResult(const ProcessedDocument& processed, const FileParseOptions& options) {
+json buildFileResult(
+    const ProcessedDocument& processed,
+    const FileParseOptions& options,
+    const DispatchMetadata& dispatch)
+{
     json result{
         {"filename", processed.filename},
         {"backend", options.backend},
         {"deepx", true},
         {"engines", makeEngineJson(options.tableEnable, options.formulaEnable)},
-        {"stats", makeStatsJson(processed.result, processed.pipelineCallTimeMs)},
+        {"topology", dispatch.topology},
+        {"device_id", dispatch.deviceId},
+        {"shard_id", dispatch.shardId},
+        {"backend_id", dispatch.backendId},
+        {"stats", makeStatsJson(
+            processed.result,
+            processed.pipelineCallTimeMs,
+            dispatch.routeQueueMs,
+            dispatch.lbProxyMs)},
         {"output_dir", processed.parseDir.string()},
         {"markdown_path", processed.markdownPath.string()},
         {"content_list_path", processed.contentListPath.string()},
@@ -728,10 +886,65 @@ DocServer::DocServer(const ServerConfig& config)
 {
     fs::create_directories(config_.uploadDir);
 
-    pipeline_ = std::make_unique<DocPipeline>(config_.pipelineConfig);
-    pipeline_->externalNpuSerialMutex_ = &pipelineMutex_;
-    if (!pipeline_->initialize()) {
-        throw std::runtime_error("Failed to initialize document pipeline");
+    std::string topology = toLower(config_.topology);
+    if (topology.empty()) {
+        topology = "single_pipeline";
+    }
+    if (topology == "single_pipeline" && config_.deviceIds.size() > 1) {
+        topology = "single_process_multi_device";
+    }
+    config_.topology = topology;
+    config_.serverId = makeServerId(config_, topology);
+
+    std::vector<int> shardDeviceIds = config_.deviceIds;
+    if (config_.topology == "single_process_multi_device") {
+        if (shardDeviceIds.empty()) {
+            shardDeviceIds = discoverDxrtDeviceIds();
+        }
+        if (shardDeviceIds.empty()) {
+            shardDeviceIds.push_back(config_.pipelineConfig.runtime.deviceId);
+        }
+    } else {
+        if (shardDeviceIds.empty()) {
+            shardDeviceIds.push_back(config_.pipelineConfig.runtime.deviceId);
+        } else {
+            shardDeviceIds.resize(1);
+        }
+    }
+
+    if (shardDeviceIds.empty()) {
+        shardDeviceIds.push_back(-1);
+    }
+
+    std::sort(shardDeviceIds.begin(), shardDeviceIds.end());
+    shardDeviceIds.erase(
+        std::unique(shardDeviceIds.begin(), shardDeviceIds.end()),
+        shardDeviceIds.end());
+
+    for (size_t i = 0; i < shardDeviceIds.size(); ++i) {
+        auto shard = std::make_unique<PipelineShard>();
+        shard->deviceId = shardDeviceIds[i];
+        shard->shardId = "shard_" + std::to_string(i);
+
+        PipelineConfig shardConfig = config_.pipelineConfig;
+        shardConfig.runtime.deviceId = shard->deviceId;
+        shard->pipeline = std::make_unique<DocPipeline>(shardConfig);
+        shard->pipeline->externalNpuSerialMutex_ = &shard->npuSerialMutex;
+        if (!shard->pipeline->initialize()) {
+            throw std::runtime_error(
+                "Failed to initialize document pipeline for " + shard->shardId);
+        }
+        shards_.push_back(std::move(shard));
+    }
+
+    std::vector<int> telemetryDeviceIds;
+    for (const auto& shard : shards_) {
+        if (shard->deviceId >= 0) {
+            telemetryDeviceIds.push_back(shard->deviceId);
+        }
+    }
+    if (!telemetryDeviceIds.empty()) {
+        deviceMetricsSampler_ = std::make_unique<DeviceMetricsSampler>(telemetryDeviceIds);
     }
 }
 
@@ -739,10 +952,90 @@ DocServer::~DocServer() {
     stop();
 }
 
+size_t DocServer::selectShardIndex() {
+    if (shards_.empty()) {
+        throw std::runtime_error("No pipeline shards configured");
+    }
+
+    const size_t shardCount = shards_.size();
+    const size_t start = static_cast<size_t>(
+        routingCursor_.fetch_add(1, std::memory_order_relaxed) % shardCount);
+
+    size_t bestIndex = start;
+    uint64_t bestInflight = shards_[start]->inflight.load(std::memory_order_relaxed);
+    for (size_t offset = 1; offset < shardCount; ++offset) {
+        const size_t idx = (start + offset) % shardCount;
+        const uint64_t inflight = shards_[idx]->inflight.load(std::memory_order_relaxed);
+        if (inflight < bestInflight) {
+            bestInflight = inflight;
+            bestIndex = idx;
+        }
+    }
+    return bestIndex;
+}
+
+std::string DocServer::resolvedTopology() const {
+    if (!config_.topology.empty()) {
+        return config_.topology;
+    }
+    return (shards_.size() > 1) ? "single_process_multi_device" : "single_pipeline";
+}
+
 void DocServer::run() {
     LOG_INFO("Starting RapidDoc HTTP server on {}:{}", config_.host, config_.port);
 
     crow::SimpleApp app;
+    if (deviceMetricsSampler_) {
+        deviceMetricsSampler_->start();
+    }
+
+    auto executeDocument = [this](
+        const std::string& bytes,
+        const std::string& filename,
+        const FileParseOptions& options) -> RoutedProcessedDocument
+    {
+        const size_t shardIndex = selectShardIndex();
+        auto& shard = *shards_.at(shardIndex);
+
+        DispatchMetadata dispatch;
+        dispatch.topology = resolvedTopology();
+        dispatch.deviceId = shard.deviceId;
+        dispatch.shardId = shard.shardId;
+        dispatch.backendId =
+            (dispatch.topology == "single_card_backend") ? config_.serverId : std::string();
+
+        shard.inflight.fetch_add(1, std::memory_order_relaxed);
+        try {
+            const auto queueStart = std::chrono::steady_clock::now();
+            std::unique_lock<std::mutex> shardLock(shard.requestMutex);
+            const auto shardAcquired = std::chrono::steady_clock::now();
+            dispatch.routeQueueMs =
+                std::chrono::duration<double, std::milli>(shardAcquired - queueStart).count();
+
+            RoutedProcessedDocument routed;
+            routed.dispatch = dispatch;
+            routed.processed = processDocumentBytes(*shard.pipeline, bytes, filename, options);
+
+            const auto shardDone = std::chrono::steady_clock::now();
+            shard.routeQueueUsTotal.fetch_add(
+                msToUs(routed.dispatch.routeQueueMs),
+                std::memory_order_relaxed);
+            shard.busyUsTotal.fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    shardDone - shardAcquired).count()),
+                std::memory_order_relaxed);
+            shard.npuBusyUsTotal.fetch_add(
+                msToUs(routed.processed.result.stats.npuSerialTimeMs),
+                std::memory_order_relaxed);
+            shard.requestCount.fetch_add(1, std::memory_order_relaxed);
+            recordPipelineLockStats(routed.processed.result);
+            shard.inflight.fetch_sub(1, std::memory_order_relaxed);
+            return routed;
+        } catch (...) {
+            shard.inflight.fetch_sub(1, std::memory_order_relaxed);
+            throw;
+        }
+    };
 
     CROW_ROUTE(app, "/health")
     ([this]() {
@@ -759,7 +1052,7 @@ void DocServer::run() {
     });
 
     CROW_ROUTE(app, "/process").methods("POST"_method)
-    ([this](const crow::request& req) {
+    ([this, &executeDocument](const crow::request& req) {
         requestCount_++;
 
         try {
@@ -793,15 +1086,22 @@ void DocServer::run() {
             options.returnContentList = true;
             options.clearOutputFile = true;
 
-            const ProcessedDocument processed = processDocumentBytes(
-                *pipeline_, filePart.body, filename, options);
-            recordPipelineLockStats(processed.result);
+            const RoutedProcessedDocument routed = executeDocument(filePart.body, filename, options);
+            const auto& processed = routed.processed;
             json legacyResponse{
                 {"pages", processed.result.processedPages},
                 {"total_pages", processed.result.totalPages},
                 {"skipped", processed.result.skippedElements},
                 {"time_ms", processed.result.totalTimeMs},
-                {"stats", makeStatsJson(processed.result, processed.pipelineCallTimeMs)},
+                {"topology", routed.dispatch.topology},
+                {"device_id", routed.dispatch.deviceId},
+                {"shard_id", routed.dispatch.shardId},
+                {"backend_id", routed.dispatch.backendId},
+                {"stats", makeStatsJson(
+                    processed.result,
+                    processed.pipelineCallTimeMs,
+                    routed.dispatch.routeQueueMs,
+                    routed.dispatch.lbProxyMs)},
                 {"markdown", processed.result.markdown},
                 {"content_list", processed.contentList},
                 {"output_dir", processed.parseDir.string()},
@@ -821,7 +1121,7 @@ void DocServer::run() {
     });
 
     CROW_ROUTE(app, "/process/base64").methods("POST"_method)
-    ([this](const crow::request& req) {
+    ([this, &executeDocument](const crow::request& req) {
         requestCount_++;
 
         try {
@@ -844,18 +1144,25 @@ void DocServer::run() {
             options.returnContentList = true;
             options.clearOutputFile = true;
 
-            const ProcessedDocument processed = processDocumentBytes(
-                *pipeline_,
+            const RoutedProcessedDocument routed = executeDocument(
                 std::string(reinterpret_cast<const char*>(decoded.data()), decoded.size()),
                 filename,
                 options);
-            recordPipelineLockStats(processed.result);
+            const auto& processed = routed.processed;
             json legacyResponse{
                 {"pages", processed.result.processedPages},
                 {"total_pages", processed.result.totalPages},
                 {"skipped", processed.result.skippedElements},
                 {"time_ms", processed.result.totalTimeMs},
-                {"stats", makeStatsJson(processed.result, processed.pipelineCallTimeMs)},
+                {"topology", routed.dispatch.topology},
+                {"device_id", routed.dispatch.deviceId},
+                {"shard_id", routed.dispatch.shardId},
+                {"backend_id", routed.dispatch.backendId},
+                {"stats", makeStatsJson(
+                    processed.result,
+                    processed.pipelineCallTimeMs,
+                    routed.dispatch.routeQueueMs,
+                    routed.dispatch.lbProxyMs)},
                 {"markdown", processed.result.markdown},
                 {"content_list", processed.contentList},
                 {"output_dir", processed.parseDir.string()},
@@ -875,7 +1182,7 @@ void DocServer::run() {
     });
 
     CROW_ROUTE(app, "/file_parse").methods("POST"_method)
-    ([this](const crow::request& req) {
+    ([this, &executeDocument](const crow::request& req) {
         requestCount_++;
 
         try {
@@ -909,10 +1216,8 @@ void DocServer::run() {
                 }
 
                 try {
-                    ProcessedDocument processed = processDocumentBytes(
-                        *pipeline_, part.body, filename, options);
-                    recordPipelineLockStats(processed.result);
-                    json fileResult = buildFileResult(processed, options);
+                    RoutedProcessedDocument routed = executeDocument(part.body, filename, options);
+                    json fileResult = buildFileResult(routed.processed, options, routed.dispatch);
                     if (!requestWarnings.empty()) {
                         fileResult["request_warnings"] = requestWarnings;
                     }
@@ -920,7 +1225,7 @@ void DocServer::run() {
                     successFiles++;
 
                     if (options.clearOutputFile) {
-                        fs::remove_all(processed.requestDir);
+                        fs::remove_all(routed.processed.requestDir);
                     }
                 }
                 catch (const std::exception& e) {
@@ -956,7 +1261,7 @@ void DocServer::run() {
     });
 
     CROW_ROUTE(app, "/v1/images:annotate").methods("POST"_method)
-    ([this](const crow::request& req) {
+    ([this, &executeDocument](const crow::request& req) {
         requestCount_++;
 
         try {
@@ -1052,9 +1357,9 @@ void DocServer::run() {
                     options.clearOutputFile = true;
                     options.deepxRequested = requestItem.value("deepx", globalDeepx);
 
-                    const ProcessedDocument processed = processDocumentBytes(
-                        *pipeline_, imageBytes, imageName, options);
-                    recordPipelineLockStats(processed.result);
+                    const RoutedProcessedDocument routed = executeDocument(
+                        imageBytes, imageName, options);
+                    const auto& processed = routed.processed;
 
                     json responseItem;
                     if (textDetection) {
@@ -1073,6 +1378,16 @@ void DocServer::run() {
                         responseItem["middleJson"] = processed.middleJson;
                         responseItem["contentList"] = processed.contentList;
                     }
+
+                    responseItem["topology"] = routed.dispatch.topology;
+                    responseItem["device_id"] = routed.dispatch.deviceId;
+                    responseItem["shard_id"] = routed.dispatch.shardId;
+                    responseItem["backend_id"] = routed.dispatch.backendId;
+                    responseItem["stats"] = makeStatsJson(
+                        processed.result,
+                        processed.pipelineCallTimeMs,
+                        routed.dispatch.routeQueueMs,
+                        routed.dispatch.lbProxyMs);
 
                     responses.push_back(std::move(responseItem));
                     fs::remove_all(processed.requestDir);
@@ -1112,6 +1427,9 @@ void DocServer::run() {
 
 void DocServer::stop() {
     running_ = false;
+    if (deviceMetricsSampler_) {
+        deviceMetricsSampler_->stop();
+    }
     LOG_INFO("RapidDoc HTTP server stopped");
 }
 
@@ -1122,16 +1440,60 @@ std::string DocServer::handleProcess(const std::string& pdfData, const std::stri
     options.returnContentList = true;
     options.clearOutputFile = true;
 
-    const ProcessedDocument processed = processDocumentBytes(
-        *pipeline_, pdfData, filename, options);
-    recordPipelineLockStats(processed.result);
+    const size_t shardIndex = selectShardIndex();
+    auto& shard = *shards_.at(shardIndex);
+    DispatchMetadata dispatch;
+    dispatch.topology = resolvedTopology();
+    dispatch.deviceId = shard.deviceId;
+    dispatch.shardId = shard.shardId;
+    dispatch.backendId =
+        (dispatch.topology == "single_card_backend") ? config_.serverId : std::string();
+
+    shard.inflight.fetch_add(1, std::memory_order_relaxed);
+    RoutedProcessedDocument routed;
+    try {
+        const auto queueStart = std::chrono::steady_clock::now();
+        std::unique_lock<std::mutex> lock(shard.requestMutex);
+        const auto shardAcquired = std::chrono::steady_clock::now();
+        dispatch.routeQueueMs =
+            std::chrono::duration<double, std::milli>(shardAcquired - queueStart).count();
+        routed.dispatch = dispatch;
+        routed.processed = processDocumentBytes(*shard.pipeline, pdfData, filename, options);
+        const auto shardDone = std::chrono::steady_clock::now();
+        shard.routeQueueUsTotal.fetch_add(
+            msToUs(dispatch.routeQueueMs),
+            std::memory_order_relaxed);
+        shard.busyUsTotal.fetch_add(
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                shardDone - shardAcquired).count()),
+            std::memory_order_relaxed);
+        shard.npuBusyUsTotal.fetch_add(
+            msToUs(routed.processed.result.stats.npuSerialTimeMs),
+            std::memory_order_relaxed);
+        shard.requestCount.fetch_add(1, std::memory_order_relaxed);
+        recordPipelineLockStats(routed.processed.result);
+        shard.inflight.fetch_sub(1, std::memory_order_relaxed);
+    } catch (...) {
+        shard.inflight.fetch_sub(1, std::memory_order_relaxed);
+        throw;
+    }
+
+    const auto& processed = routed.processed;
 
     json response{
         {"pages", processed.result.processedPages},
         {"total_pages", processed.result.totalPages},
         {"skipped", processed.result.skippedElements},
         {"time_ms", processed.result.totalTimeMs},
-        {"stats", makeStatsJson(processed.result, processed.pipelineCallTimeMs)},
+        {"topology", routed.dispatch.topology},
+        {"device_id", routed.dispatch.deviceId},
+        {"shard_id", routed.dispatch.shardId},
+        {"backend_id", routed.dispatch.backendId},
+        {"stats", makeStatsJson(
+            processed.result,
+            processed.pipelineCallTimeMs,
+            routed.dispatch.routeQueueMs,
+            routed.dispatch.lbProxyMs)},
         {"markdown", processed.result.markdown},
         {"content_list", processed.contentList},
         {"output_dir", processed.parseDir.string()},
@@ -1150,11 +1512,90 @@ std::string DocServer::buildStatusJson() {
     const double holdAvgMs = samples == 0 ? 0.0 :
         static_cast<double>(holdUsTotal) / static_cast<double>(samples) / 1000.0;
 
+    std::unordered_map<int, DeviceMetricSample> metricsByDevice;
+    std::string memoryTelemetryStatus = "blocked_memory_telemetry_unavailable";
+    if (deviceMetricsSampler_) {
+        memoryTelemetryStatus = deviceMetricsSampler_->memoryTelemetryStatus();
+        for (const auto& sample : deviceMetricsSampler_->snapshot()) {
+            metricsByDevice[sample.deviceId] = sample;
+        }
+    }
+
+    std::vector<double> activeRequestCounts;
+    std::vector<double> activeBusyMs;
+    for (const auto& shard : shards_) {
+        const double requests =
+            static_cast<double>(shard->requestCount.load(std::memory_order_relaxed));
+        const double busyMs =
+            static_cast<double>(shard->busyUsTotal.load(std::memory_order_relaxed)) / 1000.0;
+        if (requests > 0.0 || busyMs > 0.0) {
+            activeRequestCounts.push_back(requests);
+            activeBusyMs.push_back(busyMs);
+        }
+    }
+
+    bool loadImbalance = false;
+    auto maxMinRatio = [](const std::vector<double>& values) -> double {
+        if (values.size() < 2) {
+            return 1.0;
+        }
+        const auto [minIt, maxIt] = std::minmax_element(values.begin(), values.end());
+        if (*minIt <= 0.0) {
+            return (*maxIt > 0.0) ? std::numeric_limits<double>::infinity() : 1.0;
+        }
+        return *maxIt / *minIt;
+    };
+    loadImbalance = maxMinRatio(activeRequestCounts) > 1.20 || maxMinRatio(activeBusyMs) > 1.20;
+
+    json perDevice = json::array();
+    json configuredDeviceIds = json::array();
+    for (const auto& shard : shards_) {
+        configuredDeviceIds.push_back(shard->deviceId);
+        const uint64_t requestCount = shard->requestCount.load(std::memory_order_relaxed);
+        const uint64_t busyUs = shard->busyUsTotal.load(std::memory_order_relaxed);
+        const uint64_t npuBusyUs = shard->npuBusyUsTotal.load(std::memory_order_relaxed);
+        const uint64_t routeQueueUs = shard->routeQueueUsTotal.load(std::memory_order_relaxed);
+        const auto metricsIt = metricsByDevice.find(shard->deviceId);
+
+        json item{
+            {"device_id", shard->deviceId},
+            {"shard_id", shard->shardId},
+            {"request_count", requestCount},
+            {"inflight", shard->inflight.load(std::memory_order_relaxed)},
+            {"busy_time_ms", static_cast<double>(busyUs) / 1000.0},
+            {"npu_busy_time_ms", static_cast<double>(npuBusyUs) / 1000.0},
+            {"avg_infer_ms", requestCount == 0 ? 0.0 :
+                static_cast<double>(npuBusyUs) / static_cast<double>(requestCount) / 1000.0},
+            {"route_queue_total_ms", static_cast<double>(routeQueueUs) / 1000.0},
+            {"memory_total_bytes", nullptr},
+            {"memory_last_used_bytes", nullptr},
+            {"memory_peak_used_bytes", nullptr},
+            {"load_imbalance_flag", loadImbalance},
+        };
+
+        if (metricsIt != metricsByDevice.end()) {
+            item["memory_total_bytes"] = metricsIt->second.memoryTotalBytes;
+            item["memory_last_used_bytes"] = maybeUIntToJson(metricsIt->second.memoryLastUsedBytes);
+            item["memory_peak_used_bytes"] = maybeUIntToJson(metricsIt->second.memoryPeakUsedBytes);
+        }
+        perDevice.push_back(std::move(item));
+    }
+
     json status{
         {"status", running_.load() ? "running" : "stopped"},
         {"requests", requestCount_.load()},
         {"success", successCount_.load()},
         {"errors", errorCount_.load()},
+        {"topology", {
+            {"mode", resolvedTopology()},
+            {"server_id", config_.serverId},
+            {"routing_policy", config_.routingPolicy},
+            {"worker_count", config_.numWorkers},
+            {"shard_count", shards_.size()},
+            {"configured_device_ids", configuredDeviceIds},
+            {"memory_telemetry_status", memoryTelemetryStatus},
+        }},
+        {"per_device", std::move(perDevice)},
         {"pipeline_lock", {
             {"samples", samples},
             {"wait_total_ms", static_cast<double>(waitUsTotal) / 1000.0},
@@ -1168,7 +1609,9 @@ std::string DocServer::buildStatusJson() {
             {"npu_serial_ms", static_cast<double>(npuStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
             {"cpu_only_ms", static_cast<double>(cpuStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
         }},
-        {"engines", makeEngineJson(true, true)},
+        {"engines", makeEngineJson(
+            config_.pipelineConfig.stages.enableWiredTable,
+            config_.pipelineConfig.stages.enableFormula)},
         {"capabilities", {
             {"layout", true},
             {"ocr", true},

@@ -168,9 +168,16 @@ bool LayoutDetector::initialize() {
     LOG_INFO("Initializing Layout detector...");
     LOG_INFO("  DXNN model: {}", config_.dxnnModelPath);
     LOG_INFO("  ONNX sub-model: {}", config_.onnxSubModelPath);
+    LOG_INFO("  Device ID: {}", config_.deviceId);
 
     try {
-        impl_->dxEngine = std::make_unique<dxrt::InferenceEngine>(config_.dxnnModelPath);
+        if (config_.deviceId >= 0) {
+            dxrt::InferenceOption option;
+            option.devices.push_back(config_.deviceId);
+            impl_->dxEngine = std::make_unique<dxrt::InferenceEngine>(config_.dxnnModelPath, option);
+        } else {
+            impl_->dxEngine = std::make_unique<dxrt::InferenceEngine>(config_.dxnnModelPath);
+        }
     } catch (const std::exception& e) {
         LOG_ERROR("Failed to load DX Engine model: {}", e.what());
         return false;

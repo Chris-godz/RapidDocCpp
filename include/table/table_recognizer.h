@@ -30,6 +30,7 @@ struct TableRecognizerConfig {
     int inputSize = 768;             // Model input size (matches Python DXNN target_size=768)
     float threshold = 0.5f;          // Segmentation threshold
     bool useAsync = false;           // Enable async inference
+    int deviceId = -1;               // DXRT device affinity (-1 = runtime default)
 };
 
 /**

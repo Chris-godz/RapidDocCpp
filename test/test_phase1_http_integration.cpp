@@ -240,6 +240,15 @@ TEST_F(FileParseHttpIntegrationTest, file_parse_multipart_success_contract) {
     ASSERT_TRUE(result["stats"].is_object());
     ASSERT_TRUE(result.contains("content_list"));
     ASSERT_TRUE(result["content_list"].is_array());
+    ASSERT_TRUE(result.contains("topology"));
+    ASSERT_TRUE(result.contains("device_id"));
+    ASSERT_TRUE(result.contains("shard_id"));
+    ASSERT_TRUE(result.contains("backend_id"));
+    EXPECT_EQ(result.value("topology", ""), "single_pipeline");
+    EXPECT_TRUE(result["stats"].contains("route_queue_ms"));
+    EXPECT_TRUE(result["stats"].contains("lb_proxy_ms"));
+    EXPECT_GE(result["stats"].value("route_queue_ms", -1.0), 0.0);
+    EXPECT_GE(result["stats"].value("lb_proxy_ms", -1.0), 0.0);
 
     const int pages = result["stats"].value("pages", 0);
     const int totalPages = result["stats"].value("total_pages", 0);
@@ -466,6 +475,11 @@ TEST_F(FileParseHttpIntegrationTest, status_reports_pipeline_lock_observability)
 
     const json status = json::parse(statusRes.body, nullptr, false);
     ASSERT_FALSE(status.is_discarded()) << statusRes.body;
+    ASSERT_TRUE(status.contains("topology"));
+    ASSERT_TRUE(status["topology"].is_object());
+    EXPECT_EQ(status["topology"].value("mode", ""), "single_pipeline");
+    ASSERT_TRUE(status.contains("per_device"));
+    ASSERT_TRUE(status["per_device"].is_array());
     ASSERT_TRUE(status.contains("pipeline_lock"));
     ASSERT_TRUE(status["pipeline_lock"].is_object());
     ASSERT_TRUE(status["pipeline_lock"].contains("samples"));

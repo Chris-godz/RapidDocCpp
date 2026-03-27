@@ -1,0 +1,12 @@
+[
+  {
+    "name": "ocr_only_doc",
+    "path": "test_files/small_ocr_origin.pdf",
+    "fields": {
+      "return_md": "true",
+      "return_middle_json": "true",
+      "return_content_list": "true",
+      "clear_output_file": "true"
+    }
+  }
+]

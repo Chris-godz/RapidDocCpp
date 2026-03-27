@@ -192,6 +192,7 @@ bool DocPipeline::initialize() {
         layoutCfg.onnxSubModelPath = config_.models.layoutOnnxSubModel;
         layoutCfg.inputSize = config_.runtime.layoutInputSize;
         layoutCfg.confThreshold = config_.runtime.layoutConfThreshold;
+        layoutCfg.deviceId = config_.runtime.deviceId;
         layoutDetector_ = std::make_unique<LayoutDetector>(layoutCfg);
         if (!layoutDetector_->initialize()) {
             LOG_ERROR("Failed to initialize layout detector");
@@ -205,6 +206,7 @@ bool DocPipeline::initialize() {
         TableRecognizerConfig tableCfg;
         tableCfg.unetDxnnModelPath = config_.models.tableUnetDxnnModel;
         tableCfg.threshold = config_.runtime.tableConfThreshold;
+        tableCfg.deviceId = config_.runtime.deviceId;
         tableRecognizer_ = std::make_unique<TableRecognizer>(tableCfg);
         if (!tableRecognizer_->initialize()) {
             LOG_ERROR("Failed to initialize table recognizer");
@@ -221,6 +223,7 @@ bool DocPipeline::initialize() {
         ocrCfg.detectorConfig.model640Path = config_.models.ocrModelDir + "/det_v5_640.dxnn";
         ocrCfg.detectorConfig.model960Path = "";
         ocrCfg.detectorConfig.sizeThreshold = 99999;
+        ocrCfg.detectorConfig.deviceId = config_.runtime.deviceId;
 
         // Recognition model paths
         std::string mdir = config_.models.ocrModelDir;
@@ -233,6 +236,7 @@ bool DocPipeline::initialize() {
             {35, mdir + "/rec_v5_ratio_35.dxnn"},
         };
         ocrCfg.recognizerConfig.dictPath = config_.models.ocrDictPath;
+        ocrCfg.recognizerConfig.deviceId = config_.runtime.deviceId;
 
         // Disable heavy document-level preprocessing for per-region OCR
         ocrCfg.useDocPreprocessing = false;

@@ -109,7 +109,7 @@ public:
     }
 
     static DocPipeline& pipeline(DocServer& server) {
-        return *server.pipeline_;
+        return *server.shards_.front()->pipeline;
     }
 };
 

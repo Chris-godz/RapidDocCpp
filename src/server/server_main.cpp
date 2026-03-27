@@ -10,6 +10,8 @@
 #include <csignal>
 #include <cstdlib>
 #include <getopt.h>
+#include <sstream>
+#include <vector>
 
 static rapid_doc::DocServer* g_server = nullptr;
 
@@ -27,6 +29,13 @@ void printUsage(const char* programName) {
     std::cout << "  -H, --host <addr>     Bind address (default: 0.0.0.0)\n";
     std::cout << "  -p, --port <num>      Port number (default: 8080)\n";
     std::cout << "  -w, --workers <num>   Worker threads (default: 4)\n";
+    std::cout << "      --device-id <id>  Pin this server to one DXRT device\n";
+    std::cout << "      --device-ids <a,b> Configure multi-device shards in one process\n";
+    std::cout << "      --topology <mode> single_pipeline|single_process_multi_device|single_card_backend\n";
+    std::cout << "      --routing-policy <p> Routing policy (default: least_inflight_rr)\n";
+    std::cout << "      --server-id <id>  Stable server/backend identifier\n";
+    std::cout << "      --no-ocr          Disable OCR stage\n";
+    std::cout << "      --no-table        Disable wired table stage\n";
     std::cout << "  -h, --help            Show this help\n";
     std::cout << "\n";
     std::cout << "API Endpoints:\n";
@@ -38,6 +47,18 @@ void printUsage(const char* programName) {
     std::cout << "  GET  /status            - Server statistics\n";
 }
 
+std::vector<int> parseDeviceIds(const std::string& raw) {
+    std::vector<int> ids;
+    std::stringstream stream(raw);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+        if (!token.empty()) {
+            ids.push_back(std::atoi(token.c_str()));
+        }
+    }
+    return ids;
+}
+
 int main(int argc, char* argv[]) {
     rapid_doc::ServerConfig config;
     config.pipelineConfig = rapid_doc::PipelineConfig::Default(PROJECT_ROOT_DIR);
@@ -47,6 +68,13 @@ int main(int argc, char* argv[]) {
         {"host",    required_argument, nullptr, 'H'},
         {"port",    required_argument, nullptr, 'p'},
         {"workers", required_argument, nullptr, 'w'},
+        {"device-id", required_argument, nullptr, 256},
+        {"device-ids", required_argument, nullptr, 257},
+        {"topology", required_argument, nullptr, 258},
+        {"routing-policy", required_argument, nullptr, 259},
+        {"server-id", required_argument, nullptr, 260},
+        {"no-ocr", no_argument, nullptr, 261},
+        {"no-table", no_argument, nullptr, 262},
         {"help",    no_argument,       nullptr, 'h'},
         {nullptr,   0,                 nullptr, 0}
     };
@@ -57,6 +85,28 @@ int main(int argc, char* argv[]) {
             case 'H': config.host = optarg; break;
             case 'p': config.port = std::atoi(optarg); break;
             case 'w': config.numWorkers = std::atoi(optarg); break;
+            case 256:
+                config.pipelineConfig.runtime.deviceId = std::atoi(optarg);
+                config.deviceIds = {config.pipelineConfig.runtime.deviceId};
+                break;
+            case 257:
+                config.deviceIds = parseDeviceIds(optarg);
+                break;
+            case 258:
+                config.topology = optarg;
+                break;
+            case 259:
+                config.routingPolicy = optarg;
+                break;
+            case 260:
+                config.serverId = optarg;
+                break;
+            case 261:
+                config.pipelineConfig.stages.enableOcr = false;
+                break;
+            case 262:
+                config.pipelineConfig.stages.enableWiredTable = false;
+                break;
             case 'h': printUsage(argv[0]); return 0;
             default:  printUsage(argv[0]); return 1;
         }

@@ -46,8 +46,17 @@ TableRecognizer::~TableRecognizer() = default;
 bool TableRecognizer::initialize() {
     LOG_INFO("Initializing Table recognizer (wired tables only)...");
     LOG_INFO("  UNET DXNN model: {}", config_.unetDxnnModelPath);
+    LOG_INFO("  Device ID: {}", config_.deviceId);
     try {
-        impl_->dxEngine = std::make_unique<dxrt::InferenceEngine>(config_.unetDxnnModelPath);
+        if (config_.deviceId >= 0) {
+            dxrt::InferenceOption option;
+            option.devices.push_back(config_.deviceId);
+            impl_->dxEngine = std::make_unique<dxrt::InferenceEngine>(
+                config_.unetDxnnModelPath,
+                option);
+        } else {
+            impl_->dxEngine = std::make_unique<dxrt::InferenceEngine>(config_.unetDxnnModelPath);
+        }
     } catch (const std::exception& e) {
         LOG_ERROR("Failed to load UNET DX Engine model: {}", e.what());
         return false;

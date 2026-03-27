@@ -76,6 +76,7 @@ void PipelineConfig::show() const {
     LOG_INFO("  Max pages:        {}", runtime.maxPages);
     LOG_INFO("  Start page:       {}", runtime.startPageId);
     LOG_INFO("  End page:         {}", runtime.endPageId);
+    LOG_INFO("  Device ID:        {}", runtime.deviceId);
     LOG_INFO("  Output dir:       {}", runtime.outputDir);
     LOG_INFO("========================================");
 }

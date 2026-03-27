@@ -58,6 +58,7 @@ struct RuntimeConfig {
     int startPageId = 0;                // Inclusive start page (0-based)
     int endPageId = -1;                 // Inclusive end page (-1 = all)
     int maxConcurrentPages = 4;         // Parallel PDF rendering limit
+    int deviceId = -1;                  // DXRT device affinity (-1 = runtime default)
     
     // Layout detection
     float layoutConfThreshold = 0.5f;   // Layout detection confidence threshold

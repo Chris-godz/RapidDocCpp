@@ -1,4 +1,6 @@
 # HTTP Server — Crow depends on standalone ASIO (asio.hpp, provided by parent)
+find_package(CURL REQUIRED)
+
 add_library(doc_server STATIC
     server.cpp
 )
@@ -42,3 +44,24 @@ set_target_properties(rapid_doc_server PROPERTIES
 )
 
 install(TARGETS rapid_doc_server DESTINATION bin)
+
+add_executable(rapid_doc_topology_lb topology_lb_main.cpp)
+
+target_include_directories(rapid_doc_topology_lb PRIVATE
+    ${CMAKE_SOURCE_DIR}/3rd-party/crow/include
+    ${ASIO_INCLUDE_DIR}
+)
+
+target_compile_definitions(rapid_doc_topology_lb PRIVATE ASIO_STANDALONE)
+
+target_link_libraries(rapid_doc_topology_lb
+    CURL::libcurl
+    nlohmann_json::nlohmann_json
+    pthread
+)
+
+set_target_properties(rapid_doc_topology_lb PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+install(TARGETS rapid_doc_topology_lb DESTINATION bin)
