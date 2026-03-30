@@ -584,12 +584,13 @@ def start_topology_a(
     port: int,
     device_ids: List[int],
     extra_flags: List[str],
+    server_workers: int = 1,
 ) -> Tuple[ServerHandle, str]:
     argv = [
         str(server_binary),
         "--host", host,
         "--port", str(port),
-        "--workers", "1",
+        "--workers", str(server_workers),
         "--topology", "single_process_multi_device",
         "--routing-policy", "least_inflight_rr",
         "--server-id", f"topology_a_{port}",
@@ -611,6 +612,8 @@ def start_topology_b(
     port: int,
     device_ids: List[int],
     extra_flags: List[str],
+    backend_workers: int = 1,
+    lb_workers: int = 1,
 ) -> Tuple[List[ServerHandle], ServerHandle, str]:
     backend_handles: List[ServerHandle] = []
     backend_urls: List[str] = []
@@ -620,7 +623,7 @@ def start_topology_b(
             str(server_binary),
             "--host", host,
             "--port", str(backend_port),
-            "--workers", "1",
+            "--workers", str(backend_workers),
             "--topology", "single_card_backend",
             "--routing-policy", "least_inflight_rr",
             "--server-id", f"backend_{index}",
@@ -638,7 +641,7 @@ def start_topology_b(
         str(lb_binary),
         "--host", host,
         "--port", str(port),
-        "--workers", "1",
+        "--workers", str(lb_workers),
         "--server-id", f"front_lb_{port}",
         "--routing-policy", "least_inflight_rr",
     ]
