@@ -143,6 +143,14 @@ size_t selectBackendIndex(
     return bestIndex;
 }
 
+int effectiveLbIngressConcurrency(int workers, size_t backendCount) {
+    int effective = std::max(1, workers);
+    if (backendCount > 1) {
+        effective = std::max(effective, static_cast<int>(backendCount) + 1);
+    }
+    return effective;
+}
+
 double maxMinRatio(const std::vector<double>& values) {
     if (values.size() < 2) {
         return 1.0;
@@ -359,6 +367,11 @@ int main(int argc, char* argv[]) {
 
     std::atomic<uint64_t> cursor{0};
     crow::SimpleApp app;
+    const int httpConcurrency = effectiveLbIngressConcurrency(workers, backends.size());
+    std::cout
+        << "LB HTTP ingress concurrency: " << httpConcurrency
+        << " (worker_count=" << workers
+        << ", backend_count=" << backends.size() << ")\n";
 
     CROW_ROUTE(app, "/health")
     ([&]() {
@@ -446,7 +459,7 @@ int main(int argc, char* argv[]) {
 
     app.bindaddr(host)
        .port(static_cast<uint16_t>(port))
-       .concurrency(static_cast<uint16_t>(workers))
+       .concurrency(static_cast<uint16_t>(httpConcurrency))
        .run();
 
     curl_global_cleanup();

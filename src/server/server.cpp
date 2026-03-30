@@ -236,6 +236,18 @@ std::string mimeTypeForPath(const fs::path& path) {
     return "application/octet-stream";
 }
 
+int effectiveHttpIngressConcurrency(
+    const std::string& topology,
+    size_t shardCount,
+    int configuredWorkers)
+{
+    int effective = std::max(1, configuredWorkers);
+    if (topology == "single_process_multi_device" && shardCount > 1) {
+        effective = std::max(effective, static_cast<int>(shardCount) + 1);
+    }
+    return effective;
+}
+
 void writeBinaryFile(const fs::path& path, const std::string& data) {
     fs::create_directories(path.parent_path());
     std::ofstream out(path, std::ios::binary);
@@ -983,6 +995,16 @@ std::string DocServer::resolvedTopology() const {
 
 void DocServer::run() {
     LOG_INFO("Starting RapidDoc HTTP server on {}:{}", config_.host, config_.port);
+    const int httpConcurrency = effectiveHttpIngressConcurrency(
+        resolvedTopology(),
+        shards_.size(),
+        config_.numWorkers);
+    LOG_INFO(
+        "HTTP ingress concurrency: {} (worker_count={}, topology={}, shard_count={})",
+        httpConcurrency,
+        config_.numWorkers,
+        resolvedTopology(),
+        shards_.size());
 
     crow::SimpleApp app;
     if (deviceMetricsSampler_) {
@@ -1420,7 +1442,7 @@ void DocServer::run() {
     running_ = true;
     app.bindaddr(config_.host)
        .port(config_.port)
-       .concurrency(config_.numWorkers)
+       .concurrency(static_cast<uint16_t>(httpConcurrency))
        .run();
     running_ = false;
 }
