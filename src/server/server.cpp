@@ -241,7 +241,10 @@ int effectiveHttpIngressConcurrency(
     size_t shardCount,
     int configuredWorkers)
 {
-    int effective = std::max(1, configuredWorkers);
+    // Benchmark worker_count remains the compute-lane count. The synchronous
+    // HTTP handler can still hold a Crow worker for the entire request, so the
+    // ingress thread pool needs enough slack to keep c6 connections open.
+    int effective = std::max(6, configuredWorkers);
     if (topology == "single_process_multi_device" && shardCount > 1) {
         effective = std::max(effective, static_cast<int>(shardCount) + 1);
     }

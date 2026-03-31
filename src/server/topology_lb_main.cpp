@@ -144,7 +144,9 @@ size_t selectBackendIndex(
 }
 
 int effectiveLbIngressConcurrency(int workers, size_t backendCount) {
-    int effective = std::max(1, workers);
+    // Mirror the server-side ingress floor so c6 frontend requests stay queued
+    // at the LB instead of being dropped while backends are busy.
+    int effective = std::max(6, workers);
     if (backendCount > 1) {
         effective = std::max(effective, static_cast<int>(backendCount) + 1);
     }
