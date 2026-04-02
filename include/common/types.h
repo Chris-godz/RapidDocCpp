@@ -210,6 +210,17 @@ struct PageStageStats {
     double tableBoxesRawCount = 0.0;
     double tableBoxesAfterDedupCount = 0.0;
     double ocrSubmitCount = 0.0;
+    double ocrSubmitAreaSum = 0.0;
+    double ocrSubmitAreaMean = 0.0;
+    double ocrSubmitAreaP50 = 0.0;
+    double ocrSubmitAreaP95 = 0.0;
+    double ocrSubmitSmallCount = 0.0;
+    double ocrSubmitMediumCount = 0.0;
+    double ocrSubmitLargeCount = 0.0;
+    double ocrSubmitTextCount = 0.0;
+    double ocrSubmitTitleCount = 0.0;
+    double ocrSubmitCodeCount = 0.0;
+    double ocrSubmitListCount = 0.0;
     double ocrDedupSkippedCount = 0.0;
     double tableNpuSubmitCount = 0.0;
     double tableDedupSkippedCount = 0.0;

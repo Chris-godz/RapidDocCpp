@@ -37,6 +37,14 @@ void accumulatePageStats(PageStageStats& target, const PageStageStats& source) {
     target.tableBoxesRawCount += source.tableBoxesRawCount;
     target.tableBoxesAfterDedupCount += source.tableBoxesAfterDedupCount;
     target.ocrSubmitCount += source.ocrSubmitCount;
+    target.ocrSubmitAreaSum += source.ocrSubmitAreaSum;
+    target.ocrSubmitSmallCount += source.ocrSubmitSmallCount;
+    target.ocrSubmitMediumCount += source.ocrSubmitMediumCount;
+    target.ocrSubmitLargeCount += source.ocrSubmitLargeCount;
+    target.ocrSubmitTextCount += source.ocrSubmitTextCount;
+    target.ocrSubmitTitleCount += source.ocrSubmitTitleCount;
+    target.ocrSubmitCodeCount += source.ocrSubmitCodeCount;
+    target.ocrSubmitListCount += source.ocrSubmitListCount;
     target.ocrDedupSkippedCount += source.ocrDedupSkippedCount;
     target.tableNpuSubmitCount += source.tableNpuSubmitCount;
     target.tableDedupSkippedCount += source.tableDedupSkippedCount;
@@ -65,8 +73,21 @@ PercentileSummary summarizeSamples(std::vector<double> samples) {
 
 DocumentStageStats accumulateDocumentStageStats(const std::vector<PageResult>& pages) {
     DocumentStageStats stats;
+    double ocrSubmitAreaP50Weighted = 0.0;
+    double ocrSubmitAreaP95Weighted = 0.0;
     for (const auto& page : pages) {
         accumulatePageStats(stats, page.stats);
+        const double submitCount = std::max(0.0, page.stats.ocrSubmitCount);
+        if (submitCount > 0.0) {
+            ocrSubmitAreaP50Weighted += page.stats.ocrSubmitAreaP50 * submitCount;
+            ocrSubmitAreaP95Weighted += page.stats.ocrSubmitAreaP95 * submitCount;
+        }
+    }
+
+    if (stats.ocrSubmitCount > 0.0) {
+        stats.ocrSubmitAreaMean = stats.ocrSubmitAreaSum / stats.ocrSubmitCount;
+        stats.ocrSubmitAreaP50 = ocrSubmitAreaP50Weighted / stats.ocrSubmitCount;
+        stats.ocrSubmitAreaP95 = ocrSubmitAreaP95Weighted / stats.ocrSubmitCount;
     }
     return stats;
 }

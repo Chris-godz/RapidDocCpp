@@ -754,6 +754,54 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     size_t tableDedupSkippedCount = 0;
     size_t ocrTimeoutCount = 0;
     size_t ocrBufferedResultHitCount = 0;
+    double ocrSubmitAreaSum = 0.0;
+    size_t ocrSubmitSmallCount = 0;
+    size_t ocrSubmitMediumCount = 0;
+    size_t ocrSubmitLargeCount = 0;
+    size_t ocrSubmitTextCount = 0;
+    size_t ocrSubmitTitleCount = 0;
+    size_t ocrSubmitCodeCount = 0;
+    size_t ocrSubmitListCount = 0;
+    std::vector<double> ocrSubmitAreas;
+    const double pageArea = std::max(1.0, static_cast<double>(pageWidth) * pageHeight);
+
+    auto recordOcrSubmitProfile = [&](LayoutCategory category, const cv::Mat& crop) {
+        if (crop.empty()) {
+            return;
+        }
+
+        const double cropArea = static_cast<double>(crop.cols) * crop.rows;
+        ocrSubmitAreaSum += cropArea;
+        ocrSubmitAreas.push_back(cropArea);
+
+        const double areaRatio = cropArea / pageArea;
+        if (areaRatio < 0.005) {
+            ++ocrSubmitSmallCount;
+        } else if (areaRatio < 0.02) {
+            ++ocrSubmitMediumCount;
+        } else {
+            ++ocrSubmitLargeCount;
+        }
+
+        if (category == LayoutCategory::TABLE) {
+            return;
+        }
+
+        switch (category) {
+            case LayoutCategory::TITLE:
+                ++ocrSubmitTitleCount;
+                break;
+            case LayoutCategory::CODE:
+                ++ocrSubmitCodeCount;
+                break;
+            case LayoutCategory::LIST:
+                ++ocrSubmitListCount;
+                break;
+            default:
+                ++ocrSubmitTextCount;
+                break;
+        }
+    };
 
     auto runNpuSerialized = [&](auto&& fn) -> double {
         auto lockWaitStart = std::chrono::steady_clock::now();
@@ -799,6 +847,7 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
         unsupportedBoxes = result.layoutResult.getUnsupportedBoxes();
         textBoxesRawCount = textBoxes.size();
         tableBoxesRawCount = tableBoxes.size();
+        ocrSubmitAreas.reserve(textBoxesRawCount + tableBoxesRawCount);
         auto bucketEnd = std::chrono::steady_clock::now();
         cpuOnlyTotalMs +=
             std::chrono::duration<double, std::milli>(bucketEnd - bucketStart).count();
@@ -865,6 +914,7 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                     continue;
                 }
                 ++ocrSubmitCount;
+                recordOcrSubmitProfile(item.box.category, item.crop);
                 bool bufferedHit = false;
                 fetch.fetched =
                     waitForOcrResult(taskId, fetch.results, fetch.success, &bufferedHit);
@@ -1071,6 +1121,7 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                     const int64_t ocrTaskId = allocateOcrTaskId();
                     if (submitOcrTask(tableWorkItems[i].crop, ocrTaskId)) {
                         ++ocrSubmitCount;
+                        recordOcrSubmitProfile(LayoutCategory::TABLE, tableWorkItems[i].crop);
                         bool ok = false;
                         bool bufferedHit = false;
                         const bool fetched = waitForOcrResult(
@@ -1153,6 +1204,20 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     result.stats.tableBoxesRawCount = static_cast<double>(tableBoxesRawCount);
     result.stats.tableBoxesAfterDedupCount = static_cast<double>(tableBoxesAfterDedupCount);
     result.stats.ocrSubmitCount = static_cast<double>(ocrSubmitCount);
+    result.stats.ocrSubmitAreaSum = ocrSubmitAreaSum;
+    if (!ocrSubmitAreas.empty()) {
+        const PercentileSummary submitAreaSummary = summarizeSamples(std::move(ocrSubmitAreas));
+        result.stats.ocrSubmitAreaMean = submitAreaSummary.meanMs;
+        result.stats.ocrSubmitAreaP50 = submitAreaSummary.p50Ms;
+        result.stats.ocrSubmitAreaP95 = submitAreaSummary.p95Ms;
+    }
+    result.stats.ocrSubmitSmallCount = static_cast<double>(ocrSubmitSmallCount);
+    result.stats.ocrSubmitMediumCount = static_cast<double>(ocrSubmitMediumCount);
+    result.stats.ocrSubmitLargeCount = static_cast<double>(ocrSubmitLargeCount);
+    result.stats.ocrSubmitTextCount = static_cast<double>(ocrSubmitTextCount);
+    result.stats.ocrSubmitTitleCount = static_cast<double>(ocrSubmitTitleCount);
+    result.stats.ocrSubmitCodeCount = static_cast<double>(ocrSubmitCodeCount);
+    result.stats.ocrSubmitListCount = static_cast<double>(ocrSubmitListCount);
     result.stats.ocrDedupSkippedCount = static_cast<double>(ocrDedupSkippedCount);
     result.stats.tableNpuSubmitCount = static_cast<double>(tableNpuSubmitCount);
     result.stats.tableDedupSkippedCount = static_cast<double>(tableDedupSkippedCount);

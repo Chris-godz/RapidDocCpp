@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
@@ -217,6 +218,17 @@ json stageStatsToJson(const DocumentStageStats& stats) {
         {"table_boxes_raw_count", stats.tableBoxesRawCount},
         {"table_boxes_after_dedup_count", stats.tableBoxesAfterDedupCount},
         {"ocr_submit_count", stats.ocrSubmitCount},
+        {"ocr_submit_area_sum", stats.ocrSubmitAreaSum},
+        {"ocr_submit_area_mean", stats.ocrSubmitAreaMean},
+        {"ocr_submit_area_p50", stats.ocrSubmitAreaP50},
+        {"ocr_submit_area_p95", stats.ocrSubmitAreaP95},
+        {"ocr_submit_small_count", stats.ocrSubmitSmallCount},
+        {"ocr_submit_medium_count", stats.ocrSubmitMediumCount},
+        {"ocr_submit_large_count", stats.ocrSubmitLargeCount},
+        {"ocr_submit_text_count", stats.ocrSubmitTextCount},
+        {"ocr_submit_title_count", stats.ocrSubmitTitleCount},
+        {"ocr_submit_code_count", stats.ocrSubmitCodeCount},
+        {"ocr_submit_list_count", stats.ocrSubmitListCount},
         {"ocr_dedup_skipped_count", stats.ocrDedupSkippedCount},
         {"table_npu_submit_count", stats.tableNpuSubmitCount},
         {"table_dedup_skipped_count", stats.tableDedupSkippedCount},
@@ -244,6 +256,17 @@ json benchmarkStatsToJson(const BenchmarkIterationResult& iteration) {
         {"table_boxes_raw_count", iteration.stageStats.tableBoxesRawCount},
         {"table_boxes_after_dedup_count", iteration.stageStats.tableBoxesAfterDedupCount},
         {"ocr_submit_count", iteration.stageStats.ocrSubmitCount},
+        {"ocr_submit_area_sum", iteration.stageStats.ocrSubmitAreaSum},
+        {"ocr_submit_area_mean", iteration.stageStats.ocrSubmitAreaMean},
+        {"ocr_submit_area_p50", iteration.stageStats.ocrSubmitAreaP50},
+        {"ocr_submit_area_p95", iteration.stageStats.ocrSubmitAreaP95},
+        {"ocr_submit_small_count", iteration.stageStats.ocrSubmitSmallCount},
+        {"ocr_submit_medium_count", iteration.stageStats.ocrSubmitMediumCount},
+        {"ocr_submit_large_count", iteration.stageStats.ocrSubmitLargeCount},
+        {"ocr_submit_text_count", iteration.stageStats.ocrSubmitTextCount},
+        {"ocr_submit_title_count", iteration.stageStats.ocrSubmitTitleCount},
+        {"ocr_submit_code_count", iteration.stageStats.ocrSubmitCodeCount},
+        {"ocr_submit_list_count", iteration.stageStats.ocrSubmitListCount},
         {"ocr_dedup_skipped_count", iteration.stageStats.ocrDedupSkippedCount},
         {"table_npu_submit_count", iteration.stageStats.tableNpuSubmitCount},
         {"table_dedup_skipped_count", iteration.stageStats.tableDedupSkippedCount},
@@ -258,6 +281,10 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
     if (iterations.empty()) {
         return mean;
     }
+
+    double ocrSubmitAreaP50Weighted = 0.0;
+    double ocrSubmitAreaP95Weighted = 0.0;
+    double ocrSubmitCountTotal = 0.0;
 
     for (const auto& iteration : iterations) {
         mean.pdfRenderTimeMs += iteration.stageStats.pdfRenderTimeMs;
@@ -278,11 +305,26 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
         mean.tableBoxesRawCount += iteration.stageStats.tableBoxesRawCount;
         mean.tableBoxesAfterDedupCount += iteration.stageStats.tableBoxesAfterDedupCount;
         mean.ocrSubmitCount += iteration.stageStats.ocrSubmitCount;
+        mean.ocrSubmitAreaSum += iteration.stageStats.ocrSubmitAreaSum;
+        mean.ocrSubmitSmallCount += iteration.stageStats.ocrSubmitSmallCount;
+        mean.ocrSubmitMediumCount += iteration.stageStats.ocrSubmitMediumCount;
+        mean.ocrSubmitLargeCount += iteration.stageStats.ocrSubmitLargeCount;
+        mean.ocrSubmitTextCount += iteration.stageStats.ocrSubmitTextCount;
+        mean.ocrSubmitTitleCount += iteration.stageStats.ocrSubmitTitleCount;
+        mean.ocrSubmitCodeCount += iteration.stageStats.ocrSubmitCodeCount;
+        mean.ocrSubmitListCount += iteration.stageStats.ocrSubmitListCount;
         mean.ocrDedupSkippedCount += iteration.stageStats.ocrDedupSkippedCount;
         mean.tableNpuSubmitCount += iteration.stageStats.tableNpuSubmitCount;
         mean.tableDedupSkippedCount += iteration.stageStats.tableDedupSkippedCount;
         mean.ocrTimeoutCount += iteration.stageStats.ocrTimeoutCount;
         mean.ocrBufferedResultHitCount += iteration.stageStats.ocrBufferedResultHitCount;
+
+        const double submitCount = std::max(0.0, iteration.stageStats.ocrSubmitCount);
+        if (submitCount > 0.0) {
+            ocrSubmitCountTotal += submitCount;
+            ocrSubmitAreaP50Weighted += iteration.stageStats.ocrSubmitAreaP50 * submitCount;
+            ocrSubmitAreaP95Weighted += iteration.stageStats.ocrSubmitAreaP95 * submitCount;
+        }
     }
 
     const double denom = static_cast<double>(iterations.size());
@@ -304,11 +346,26 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
     mean.tableBoxesRawCount /= denom;
     mean.tableBoxesAfterDedupCount /= denom;
     mean.ocrSubmitCount /= denom;
+    mean.ocrSubmitAreaSum /= denom;
+    mean.ocrSubmitSmallCount /= denom;
+    mean.ocrSubmitMediumCount /= denom;
+    mean.ocrSubmitLargeCount /= denom;
+    mean.ocrSubmitTextCount /= denom;
+    mean.ocrSubmitTitleCount /= denom;
+    mean.ocrSubmitCodeCount /= denom;
+    mean.ocrSubmitListCount /= denom;
     mean.ocrDedupSkippedCount /= denom;
     mean.tableNpuSubmitCount /= denom;
     mean.tableDedupSkippedCount /= denom;
     mean.ocrTimeoutCount /= denom;
     mean.ocrBufferedResultHitCount /= denom;
+    if (mean.ocrSubmitCount > 0.0) {
+        mean.ocrSubmitAreaMean = mean.ocrSubmitAreaSum / mean.ocrSubmitCount;
+    }
+    if (ocrSubmitCountTotal > 0.0) {
+        mean.ocrSubmitAreaP50 = ocrSubmitAreaP50Weighted / ocrSubmitCountTotal;
+        mean.ocrSubmitAreaP95 = ocrSubmitAreaP95Weighted / ocrSubmitCountTotal;
+    }
     return mean;
 }
 
@@ -547,6 +604,17 @@ std::string buildHumanSummary(const json& summary) {
         << ", table_boxes_raw=" << formatCount(stageBreakdown.value("table_boxes_raw_count", 0.0))
         << ", table_boxes_after_dedup=" << formatCount(stageBreakdown.value("table_boxes_after_dedup_count", 0.0))
         << ", ocr_submit=" << formatCount(stageBreakdown.value("ocr_submit_count", 0.0))
+        << ", ocr_submit_area_sum=" << formatCount(stageBreakdown.value("ocr_submit_area_sum", 0.0))
+        << ", ocr_submit_area_mean=" << formatCount(stageBreakdown.value("ocr_submit_area_mean", 0.0))
+        << ", ocr_submit_area_p50=" << formatCount(stageBreakdown.value("ocr_submit_area_p50", 0.0))
+        << ", ocr_submit_area_p95=" << formatCount(stageBreakdown.value("ocr_submit_area_p95", 0.0))
+        << ", ocr_submit_small=" << formatCount(stageBreakdown.value("ocr_submit_small_count", 0.0))
+        << ", ocr_submit_medium=" << formatCount(stageBreakdown.value("ocr_submit_medium_count", 0.0))
+        << ", ocr_submit_large=" << formatCount(stageBreakdown.value("ocr_submit_large_count", 0.0))
+        << ", ocr_submit_text=" << formatCount(stageBreakdown.value("ocr_submit_text_count", 0.0))
+        << ", ocr_submit_title=" << formatCount(stageBreakdown.value("ocr_submit_title_count", 0.0))
+        << ", ocr_submit_code=" << formatCount(stageBreakdown.value("ocr_submit_code_count", 0.0))
+        << ", ocr_submit_list=" << formatCount(stageBreakdown.value("ocr_submit_list_count", 0.0))
         << ", ocr_dedup_skipped=" << formatCount(stageBreakdown.value("ocr_dedup_skipped_count", 0.0))
         << ", table_npu_submit=" << formatCount(stageBreakdown.value("table_npu_submit_count", 0.0))
         << ", table_dedup_skipped=" << formatCount(stageBreakdown.value("table_dedup_skipped_count", 0.0))

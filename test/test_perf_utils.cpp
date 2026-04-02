@@ -24,6 +24,12 @@ TEST(PerfUtilsTest, accumulateDocumentStageStatsSumsPageStageStats) {
     page0.stats.cpuOnlyTimeMs = 4.0;
     page0.stats.npuLockWaitTimeMs = 1.0;
     page0.stats.npuLockHoldTimeMs = 31.0;
+    page0.stats.ocrSubmitCount = 2.0;
+    page0.stats.ocrSubmitAreaSum = 200.0;
+    page0.stats.ocrSubmitAreaP50 = 100.0;
+    page0.stats.ocrSubmitAreaP95 = 150.0;
+    page0.stats.ocrSubmitSmallCount = 1.0;
+    page0.stats.ocrSubmitTextCount = 2.0;
 
     PageResult page1;
     page1.stats.layoutTimeMs = 1.0;
@@ -35,6 +41,12 @@ TEST(PerfUtilsTest, accumulateDocumentStageStatsSumsPageStageStats) {
     page1.stats.cpuOnlyTimeMs = 7.0;
     page1.stats.npuLockWaitTimeMs = 2.0;
     page1.stats.npuLockHoldTimeMs = 11.0;
+    page1.stats.ocrSubmitCount = 1.0;
+    page1.stats.ocrSubmitAreaSum = 300.0;
+    page1.stats.ocrSubmitAreaP50 = 300.0;
+    page1.stats.ocrSubmitAreaP95 = 300.0;
+    page1.stats.ocrSubmitLargeCount = 1.0;
+    page1.stats.ocrSubmitTitleCount = 1.0;
 
     const DocumentStageStats stats = accumulateDocumentStageStats({page0, page1});
 
@@ -49,6 +61,15 @@ TEST(PerfUtilsTest, accumulateDocumentStageStatsSumsPageStageStats) {
     EXPECT_DOUBLE_EQ(stats.cpuOnlyTimeMs, 11.0);
     EXPECT_DOUBLE_EQ(stats.npuLockWaitTimeMs, 3.0);
     EXPECT_DOUBLE_EQ(stats.npuLockHoldTimeMs, 42.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitCount, 3.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitAreaSum, 500.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitAreaMean, 500.0 / 3.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitAreaP50, (2.0 * 100.0 + 1.0 * 300.0) / 3.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitAreaP95, (2.0 * 150.0 + 1.0 * 300.0) / 3.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitSmallCount, 1.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitLargeCount, 1.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitTextCount, 2.0);
+    EXPECT_DOUBLE_EQ(stats.ocrSubmitTitleCount, 1.0);
 }
 
 TEST(PerfUtilsTest, totalTrackedStageTimeIncludesDocumentOnlyStages) {

@@ -506,6 +506,17 @@ TEST_F(FileParseHttpIntegrationTest, status_reports_pipeline_lock_observability)
     EXPECT_GE(status["pipeline_stage_totals"].value("table_boxes_raw_count", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("table_boxes_after_dedup_count", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_area_sum", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_area_mean", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_area_p50", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_area_p95", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_small_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_medium_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_large_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_text_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_title_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_code_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_list_count", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("ocr_dedup_skipped_count", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("table_npu_submit_count", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("table_dedup_skipped_count", -1.0), 0.0);

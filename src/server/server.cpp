@@ -463,6 +463,17 @@ json makeStatsJson(
         {"table_boxes_raw_count", result.stats.tableBoxesRawCount},
         {"table_boxes_after_dedup_count", result.stats.tableBoxesAfterDedupCount},
         {"ocr_submit_count", result.stats.ocrSubmitCount},
+        {"ocr_submit_area_sum", result.stats.ocrSubmitAreaSum},
+        {"ocr_submit_area_mean", result.stats.ocrSubmitAreaMean},
+        {"ocr_submit_area_p50", result.stats.ocrSubmitAreaP50},
+        {"ocr_submit_area_p95", result.stats.ocrSubmitAreaP95},
+        {"ocr_submit_small_count", result.stats.ocrSubmitSmallCount},
+        {"ocr_submit_medium_count", result.stats.ocrSubmitMediumCount},
+        {"ocr_submit_large_count", result.stats.ocrSubmitLargeCount},
+        {"ocr_submit_text_count", result.stats.ocrSubmitTextCount},
+        {"ocr_submit_title_count", result.stats.ocrSubmitTitleCount},
+        {"ocr_submit_code_count", result.stats.ocrSubmitCodeCount},
+        {"ocr_submit_list_count", result.stats.ocrSubmitListCount},
         {"ocr_dedup_skipped_count", result.stats.ocrDedupSkippedCount},
         {"table_npu_submit_count", result.stats.tableNpuSubmitCount},
         {"table_dedup_skipped_count", result.stats.tableDedupSkippedCount},
@@ -1633,6 +1644,21 @@ std::string DocServer::buildStatusJson() {
         perDevice.push_back(std::move(item));
     }
 
+    const uint64_t ocrSubmitCountTotal = ocrSubmitCountTotal_.load(std::memory_order_relaxed);
+    const double ocrSubmitAreaSumTotal =
+        static_cast<double>(ocrSubmitAreaSumTotal_.load(std::memory_order_relaxed));
+    const double ocrSubmitAreaMeanTotal = ocrSubmitCountTotal == 0
+        ? 0.0
+        : ocrSubmitAreaSumTotal / static_cast<double>(ocrSubmitCountTotal);
+    const double ocrSubmitAreaP50Total = ocrSubmitCountTotal == 0
+        ? 0.0
+        : static_cast<double>(ocrSubmitAreaP50WeightedTotal_.load(std::memory_order_relaxed)) /
+            static_cast<double>(ocrSubmitCountTotal);
+    const double ocrSubmitAreaP95Total = ocrSubmitCountTotal == 0
+        ? 0.0
+        : static_cast<double>(ocrSubmitAreaP95WeightedTotal_.load(std::memory_order_relaxed)) /
+            static_cast<double>(ocrSubmitCountTotal);
+
     json status{
         {"status", running_.load() ? "running" : "stopped"},
         {"requests", requestCount_.load()},
@@ -1673,7 +1699,18 @@ std::string DocServer::buildStatusJson() {
             {"text_boxes_after_dedup_count", textBoxesAfterDedupCountTotal_.load(std::memory_order_relaxed)},
             {"table_boxes_raw_count", tableBoxesRawCountTotal_.load(std::memory_order_relaxed)},
             {"table_boxes_after_dedup_count", tableBoxesAfterDedupCountTotal_.load(std::memory_order_relaxed)},
-            {"ocr_submit_count", ocrSubmitCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_submit_count", ocrSubmitCountTotal},
+            {"ocr_submit_area_sum", ocrSubmitAreaSumTotal},
+            {"ocr_submit_area_mean", ocrSubmitAreaMeanTotal},
+            {"ocr_submit_area_p50", ocrSubmitAreaP50Total},
+            {"ocr_submit_area_p95", ocrSubmitAreaP95Total},
+            {"ocr_submit_small_count", ocrSubmitSmallCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_submit_medium_count", ocrSubmitMediumCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_submit_large_count", ocrSubmitLargeCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_submit_text_count", ocrSubmitTextCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_submit_title_count", ocrSubmitTitleCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_submit_code_count", ocrSubmitCodeCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_submit_list_count", ocrSubmitListCountTotal_.load(std::memory_order_relaxed)},
             {"ocr_dedup_skipped_count", ocrDedupSkippedCountTotal_.load(std::memory_order_relaxed)},
             {"table_npu_submit_count", tableNpuSubmitCountTotal_.load(std::memory_order_relaxed)},
             {"table_dedup_skipped_count", tableDedupSkippedCountTotal_.load(std::memory_order_relaxed)},
@@ -1715,6 +1752,18 @@ void DocServer::recordPipelineStats(const DocumentResult& result, double pipelin
     const uint64_t tableBoxesRawCount = countToUInt(result.stats.tableBoxesRawCount);
     const uint64_t tableBoxesAfterDedupCount = countToUInt(result.stats.tableBoxesAfterDedupCount);
     const uint64_t ocrSubmitCount = countToUInt(result.stats.ocrSubmitCount);
+    const uint64_t ocrSubmitAreaSum = countToUInt(result.stats.ocrSubmitAreaSum);
+    const uint64_t ocrSubmitAreaP50Weighted =
+        countToUInt(result.stats.ocrSubmitAreaP50 * std::max(0.0, result.stats.ocrSubmitCount));
+    const uint64_t ocrSubmitAreaP95Weighted =
+        countToUInt(result.stats.ocrSubmitAreaP95 * std::max(0.0, result.stats.ocrSubmitCount));
+    const uint64_t ocrSubmitSmallCount = countToUInt(result.stats.ocrSubmitSmallCount);
+    const uint64_t ocrSubmitMediumCount = countToUInt(result.stats.ocrSubmitMediumCount);
+    const uint64_t ocrSubmitLargeCount = countToUInt(result.stats.ocrSubmitLargeCount);
+    const uint64_t ocrSubmitTextCount = countToUInt(result.stats.ocrSubmitTextCount);
+    const uint64_t ocrSubmitTitleCount = countToUInt(result.stats.ocrSubmitTitleCount);
+    const uint64_t ocrSubmitCodeCount = countToUInt(result.stats.ocrSubmitCodeCount);
+    const uint64_t ocrSubmitListCount = countToUInt(result.stats.ocrSubmitListCount);
     const uint64_t ocrDedupSkippedCount = countToUInt(result.stats.ocrDedupSkippedCount);
     const uint64_t tableNpuSubmitCount = countToUInt(result.stats.tableNpuSubmitCount);
     const uint64_t tableDedupSkippedCount = countToUInt(result.stats.tableDedupSkippedCount);
@@ -1741,6 +1790,16 @@ void DocServer::recordPipelineStats(const DocumentResult& result, double pipelin
     tableBoxesAfterDedupCountTotal_.fetch_add(
         tableBoxesAfterDedupCount, std::memory_order_relaxed);
     ocrSubmitCountTotal_.fetch_add(ocrSubmitCount, std::memory_order_relaxed);
+    ocrSubmitAreaSumTotal_.fetch_add(ocrSubmitAreaSum, std::memory_order_relaxed);
+    ocrSubmitAreaP50WeightedTotal_.fetch_add(ocrSubmitAreaP50Weighted, std::memory_order_relaxed);
+    ocrSubmitAreaP95WeightedTotal_.fetch_add(ocrSubmitAreaP95Weighted, std::memory_order_relaxed);
+    ocrSubmitSmallCountTotal_.fetch_add(ocrSubmitSmallCount, std::memory_order_relaxed);
+    ocrSubmitMediumCountTotal_.fetch_add(ocrSubmitMediumCount, std::memory_order_relaxed);
+    ocrSubmitLargeCountTotal_.fetch_add(ocrSubmitLargeCount, std::memory_order_relaxed);
+    ocrSubmitTextCountTotal_.fetch_add(ocrSubmitTextCount, std::memory_order_relaxed);
+    ocrSubmitTitleCountTotal_.fetch_add(ocrSubmitTitleCount, std::memory_order_relaxed);
+    ocrSubmitCodeCountTotal_.fetch_add(ocrSubmitCodeCount, std::memory_order_relaxed);
+    ocrSubmitListCountTotal_.fetch_add(ocrSubmitListCount, std::memory_order_relaxed);
     ocrDedupSkippedCountTotal_.fetch_add(ocrDedupSkippedCount, std::memory_order_relaxed);
     tableNpuSubmitCountTotal_.fetch_add(tableNpuSubmitCount, std::memory_order_relaxed);
     tableDedupSkippedCountTotal_.fetch_add(tableDedupSkippedCount, std::memory_order_relaxed);

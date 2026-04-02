@@ -120,6 +120,16 @@ private:
     std::atomic<uint64_t> tableBoxesRawCountTotal_{0};
     std::atomic<uint64_t> tableBoxesAfterDedupCountTotal_{0};
     std::atomic<uint64_t> ocrSubmitCountTotal_{0};
+    std::atomic<uint64_t> ocrSubmitAreaSumTotal_{0};
+    std::atomic<uint64_t> ocrSubmitAreaP50WeightedTotal_{0};
+    std::atomic<uint64_t> ocrSubmitAreaP95WeightedTotal_{0};
+    std::atomic<uint64_t> ocrSubmitSmallCountTotal_{0};
+    std::atomic<uint64_t> ocrSubmitMediumCountTotal_{0};
+    std::atomic<uint64_t> ocrSubmitLargeCountTotal_{0};
+    std::atomic<uint64_t> ocrSubmitTextCountTotal_{0};
+    std::atomic<uint64_t> ocrSubmitTitleCountTotal_{0};
+    std::atomic<uint64_t> ocrSubmitCodeCountTotal_{0};
+    std::atomic<uint64_t> ocrSubmitListCountTotal_{0};
     std::atomic<uint64_t> ocrDedupSkippedCountTotal_{0};
     std::atomic<uint64_t> tableNpuSubmitCountTotal_{0};
     std::atomic<uint64_t> tableDedupSkippedCountTotal_{0};
