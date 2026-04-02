@@ -137,7 +137,7 @@ std::vector<PageImage> PdfRenderer::renderFromMemory(const uint8_t* data, size_t
         }
 
         PageImage pi;
-        pi.image       = bgr.clone();
+        pi.image       = std::move(bgr);
         pi.pageIndex   = pageNo;
         pi.dpi         = config_.dpi;
         pi.scaleFactor = config_.dpi / 72.0;

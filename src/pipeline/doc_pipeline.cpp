@@ -166,7 +166,6 @@ std::vector<OcrWorkItem> buildOcrWorkItems(
         if (group.roi.width <= 0 || group.roi.height <= 0) {
             item.skipped = true;
         } else {
-            // CPU-only crop clone: safe outside NPU serial lock.
             item.crop = image(group.roi).clone();
         }
         items.push_back(std::move(item));
@@ -564,7 +563,7 @@ DocumentResult DocPipeline::processImageDocumentInternal(
     }
 
     PageImage pageImage;
-    pageImage.image = image.clone();
+    pageImage.image = image;
     pageImage.pageIndex = pageIndex;
     pageImage.dpi = ctx.runtime.pdfDpi;
     pageImage.scaleFactor = 1.0;
@@ -600,7 +599,7 @@ PageResult DocPipeline::processImage(const cv::Mat& image, int pageIndex) {
     LOG_INFO("Processing image: {}x{}, page {}", image.cols, image.rows, pageIndex);
 
     PageImage pageImage;
-    pageImage.image = image.clone();
+    pageImage.image = image;
     pageImage.pageIndex = pageIndex;
     pageImage.dpi = config_.runtime.pdfDpi;
     pageImage.scaleFactor = 1.0;
@@ -777,7 +776,6 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                 if (group.roi.width <= 0 || group.roi.height <= 0) {
                     item.invalidRoi = true;
                 } else {
-                    // CPU-only crop clone: safe outside NPU serial lock.
                     item.crop = image(group.roi).clone();
                 }
                 const size_t workIndex = tableWorkItems.size();

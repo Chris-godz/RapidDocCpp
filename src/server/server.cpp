@@ -743,8 +743,12 @@ ProcessedDocument processDocumentBytes(
         throw std::runtime_error("Unsupported file type: " + extension);
     }
     if (isImage) {
-        std::vector<uint8_t> buffer(bytes.begin(), bytes.end());
-        decodedImage = cv::imdecode(buffer, cv::IMREAD_COLOR);
+        cv::Mat encoded(
+            1,
+            static_cast<int>(bytes.size()),
+            CV_8UC1,
+            const_cast<char*>(bytes.data()));
+        decodedImage = cv::imdecode(encoded, cv::IMREAD_COLOR);
         if (decodedImage.empty()) {
             throw std::runtime_error("Failed to decode image: " + cleanName);
         }
