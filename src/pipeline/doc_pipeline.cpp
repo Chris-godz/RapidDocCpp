@@ -808,6 +808,7 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     if (ctx.stages.enableOcr) {
         std::vector<OcrWorkItem> ocrWorkItems;
         std::vector<size_t> ocrWorkItemForOriginal;
+        std::vector<size_t> ocrCanonicalWorkItem;
         {
             auto prepStart = std::chrono::steady_clock::now();
             ocrWorkItems = buildOcrWorkItems(image, textBoxes, pageImage.pageIndex);
@@ -816,7 +817,20 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                 ocrDedupSkippedCount += (textBoxesRawCount - textBoxesAfterDedupCount);
             }
             ocrWorkItemForOriginal.assign(textBoxes.size(), 0);
+            ocrCanonicalWorkItem.assign(ocrWorkItems.size(), 0);
+            std::unordered_map<ExactRoiKey, size_t, ExactRoiKeyHasher> ocrCanonicalByKey;
+            const cv::Rect bounds(0, 0, image.cols, image.rows);
             for (size_t workIndex = 0; workIndex < ocrWorkItems.size(); ++workIndex) {
+                ocrCanonicalWorkItem[workIndex] = workIndex;
+                const cv::Rect roi = ocrWorkItems[workIndex].box.toRect() & bounds;
+                if (roi.width > 0 && roi.height > 0) {
+                    const ExactRoiKey key{roi.x, roi.y, roi.width, roi.height};
+                    const auto [it, inserted] = ocrCanonicalByKey.emplace(key, workIndex);
+                    if (!inserted) {
+                        ocrCanonicalWorkItem[workIndex] = it->second;
+                        ++ocrDedupSkippedCount;
+                    }
+                }
                 for (size_t originalIndex : ocrWorkItems[workIndex].originalIndices) {
                     ocrWorkItemForOriginal[originalIndex] = workIndex;
                 }
@@ -830,6 +844,11 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
         result.stats.ocrTimeMs = runNpuSerialized([&]() {
             for (size_t i = 0; i < ocrWorkItems.size(); ++i) {
                 const auto& item = ocrWorkItems[i];
+                const size_t canonicalWorkIndex = ocrCanonicalWorkItem[i];
+                if (canonicalWorkIndex != i) {
+                    fetchResults[i] = fetchResults[canonicalWorkIndex];
+                    continue;
+                }
                 if (item.skipped || item.crop.empty()) {
                     continue;
                 }
@@ -895,11 +914,15 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     if (ctx.stages.enableWiredTable) {
         std::vector<TableWorkItem> tableWorkItems;
         std::vector<size_t> tableWorkItemForOriginal;
+        std::vector<size_t> tableCanonicalWorkItem;
         {
             auto prepStart = std::chrono::steady_clock::now();
             const auto groups = groupExactRoiDuplicates(tableBoxes, image.size());
             tableWorkItems.reserve(groups.size());
             tableWorkItemForOriginal.assign(tableBoxes.size(), 0);
+            tableCanonicalWorkItem.assign(groups.size(), 0);
+            std::unordered_map<ExactRoiKey, size_t, ExactRoiKeyHasher> tableCanonicalByKey;
+            const cv::Rect bounds(0, 0, image.cols, image.rows);
             for (const auto& group : groups) {
                 const auto& box = tableBoxes[group.canonicalIndex];
                 TableWorkItem item;
@@ -912,6 +935,16 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                     item.crop = image(group.roi).clone();
                 }
                 const size_t workIndex = tableWorkItems.size();
+                tableCanonicalWorkItem[workIndex] = workIndex;
+                const cv::Rect roi = box.toRect() & bounds;
+                if (roi.width > 0 && roi.height > 0) {
+                    const ExactRoiKey key{roi.x, roi.y, roi.width, roi.height};
+                    const auto [it, inserted] = tableCanonicalByKey.emplace(key, workIndex);
+                    if (!inserted) {
+                        tableCanonicalWorkItem[workIndex] = it->second;
+                        ++tableDedupSkippedCount;
+                    }
+                }
                 for (size_t originalIndex : group.originalIndices) {
                     tableWorkItemForOriginal[originalIndex] = workIndex;
                 }
@@ -929,10 +962,19 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
         std::vector<TableNpuResult> tableNpuResults;
         const double tableNpuStageMs = runNpuSerialized([&]() {
             tableNpuResults.reserve(tableWorkItems.size());
-            for (const auto& item : tableWorkItems) {
+            for (size_t i = 0; i < tableWorkItems.size(); ++i) {
+                const auto& item = tableWorkItems[i];
                 TableNpuResult npuResult;
                 npuResult.box = item.box;
                 npuResult.pageIndex = item.pageIndex;
+                const size_t canonicalWorkIndex = tableCanonicalWorkItem[i];
+                if (canonicalWorkIndex != i) {
+                    npuResult = tableNpuResults[canonicalWorkIndex];
+                    npuResult.box = item.box;
+                    npuResult.pageIndex = item.pageIndex;
+                    tableNpuResults.push_back(std::move(npuResult));
+                    continue;
+                }
 
                 if (item.invalidRoi || item.crop.empty()) {
                     npuResult.hasFallback = true;
@@ -1018,6 +1060,11 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                 for (size_t i = 0; i < tableNpuResults.size(); ++i) {
                     auto& npuResult = tableNpuResults[i];
                     if (npuResult.hasFallback || !npuResult.hasTableResult) {
+                        continue;
+                    }
+                    const size_t canonicalWorkIndex = tableCanonicalWorkItem[i];
+                    if (canonicalWorkIndex != i) {
+                        npuResult.ocrBoxes = tableNpuResults[canonicalWorkIndex].ocrBoxes;
                         continue;
                     }
 
