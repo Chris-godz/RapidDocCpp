@@ -488,6 +488,19 @@ TEST_F(FileParseHttpIntegrationTest, status_reports_pipeline_lock_observability)
     ASSERT_TRUE(status["pipeline_lock"].contains("hold_total_ms"));
     EXPECT_GE(status["pipeline_lock"].value("wait_total_ms", -1.0), 0.0);
     EXPECT_GE(status["pipeline_lock"].value("hold_total_ms", -1.0), 0.0);
+    ASSERT_TRUE(status.contains("pipeline_stage_totals"));
+    ASSERT_TRUE(status["pipeline_stage_totals"].is_object());
+    EXPECT_GE(status["pipeline_stage_totals"].value("pipeline_call_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("pdf_render_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("layout_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("table_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("reading_order_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("output_gen_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("npu_serial_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("cpu_only_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("npu_lock_wait_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("npu_lock_hold_ms", -1.0), 0.0);
 }
 
 TEST_F(FileParseHttpIntegrationTest, file_parse_concurrent_error_does_not_poison_followup) {

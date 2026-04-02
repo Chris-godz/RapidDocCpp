@@ -11,6 +11,8 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -22,6 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <sys/wait.h>
@@ -42,9 +45,12 @@ struct BenchmarkCaseDefinition {
 
 struct BenchmarkIterationResult {
     double totalTimeMs = 0.0;
+    double pipelineCallMs = 0.0;
     int processedPages = 0;
     DocumentStageStats stageStats;
     std::vector<double> pageTimesMs;
+    std::string markdownSha256;
+    std::string contentListSha256;
 };
 
 struct BenchmarkCaseResult {
@@ -60,6 +66,119 @@ std::string formatMs(double value) {
     out << std::fixed << std::setprecision(2) << value << " ms";
     return out.str();
 }
+
+namespace sha256 {
+
+constexpr std::array<uint32_t, 64> kRoundConstants = {
+    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+    0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+    0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+    0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+    0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+    0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+    0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+    0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+    0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+    0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
+};
+
+constexpr std::array<uint32_t, 8> kInitialState = {
+    0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+    0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
+};
+
+constexpr uint32_t rotr(uint32_t value, uint32_t count) {
+    return (value >> count) | (value << (32 - count));
+}
+
+std::string digest(std::string_view input) {
+    std::array<uint32_t, 8> state = kInitialState;
+    std::vector<uint8_t> bytes(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        bytes[i] = static_cast<uint8_t>(input[i]);
+    }
+
+    const uint64_t bitLength = static_cast<uint64_t>(bytes.size()) * 8u;
+    bytes.push_back(0x80u);
+    while ((bytes.size() % 64u) != 56u) {
+        bytes.push_back(0u);
+    }
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        bytes.push_back(static_cast<uint8_t>((bitLength >> shift) & 0xffu));
+    }
+
+    for (size_t offset = 0; offset < bytes.size(); offset += 64u) {
+        std::array<uint32_t, 64> schedule{};
+        for (size_t i = 0; i < 16u; ++i) {
+            const size_t base = offset + (i * 4u);
+            schedule[i] =
+                (static_cast<uint32_t>(bytes[base]) << 24) |
+                (static_cast<uint32_t>(bytes[base + 1]) << 16) |
+                (static_cast<uint32_t>(bytes[base + 2]) << 8) |
+                static_cast<uint32_t>(bytes[base + 3]);
+        }
+        for (size_t i = 16u; i < 64u; ++i) {
+            const uint32_t s0 = rotr(schedule[i - 15u], 7u) ^
+                                rotr(schedule[i - 15u], 18u) ^
+                                (schedule[i - 15u] >> 3u);
+            const uint32_t s1 = rotr(schedule[i - 2u], 17u) ^
+                                rotr(schedule[i - 2u], 19u) ^
+                                (schedule[i - 2u] >> 10u);
+            schedule[i] = schedule[i - 16u] + s0 + schedule[i - 7u] + s1;
+        }
+
+        uint32_t a = state[0];
+        uint32_t b = state[1];
+        uint32_t c = state[2];
+        uint32_t d = state[3];
+        uint32_t e = state[4];
+        uint32_t f = state[5];
+        uint32_t g = state[6];
+        uint32_t h = state[7];
+
+        for (size_t i = 0; i < 64u; ++i) {
+            const uint32_t s1 = rotr(e, 6u) ^ rotr(e, 11u) ^ rotr(e, 25u);
+            const uint32_t ch = (e & f) ^ ((~e) & g);
+            const uint32_t temp1 = h + s1 + ch + kRoundConstants[i] + schedule[i];
+            const uint32_t s0 = rotr(a, 2u) ^ rotr(a, 13u) ^ rotr(a, 22u);
+            const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            const uint32_t temp2 = s0 + maj;
+
+            h = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
+        }
+
+        state[0] += a;
+        state[1] += b;
+        state[2] += c;
+        state[3] += d;
+        state[4] += e;
+        state[5] += f;
+        state[6] += g;
+        state[7] += h;
+    }
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (uint32_t word : state) {
+        out << std::setw(8) << word;
+    }
+    return out.str();
+}
+
+} // namespace sha256
 
 json summaryToJson(const PercentileSummary& summary) {
     return json{
@@ -83,7 +202,28 @@ json stageStatsToJson(const DocumentStageStats& stats) {
         {"unsupported_ms", stats.unsupportedTimeMs},
         {"reading_order_ms", stats.readingOrderTimeMs},
         {"output_gen_ms", stats.outputGenTimeMs},
+        {"npu_serial_ms", stats.npuSerialTimeMs},
+        {"cpu_only_ms", stats.cpuOnlyTimeMs},
+        {"npu_lock_wait_ms", stats.npuLockWaitTimeMs},
+        {"npu_lock_hold_ms", stats.npuLockHoldTimeMs},
         {"tracked_total_ms", totalTrackedStageTimeMs(stats)},
+    };
+}
+
+json benchmarkStatsToJson(const BenchmarkIterationResult& iteration) {
+    return json{
+        {"time_ms", iteration.totalTimeMs},
+        {"pdf_render_ms", iteration.stageStats.pdfRenderTimeMs},
+        {"layout_ms", iteration.stageStats.layoutTimeMs},
+        {"ocr_ms", iteration.stageStats.ocrTimeMs},
+        {"table_ms", iteration.stageStats.tableTimeMs},
+        {"reading_order_ms", iteration.stageStats.readingOrderTimeMs},
+        {"output_gen_ms", iteration.stageStats.outputGenTimeMs},
+        {"npu_serial_ms", iteration.stageStats.npuSerialTimeMs},
+        {"cpu_only_ms", iteration.stageStats.cpuOnlyTimeMs},
+        {"npu_lock_wait_ms", iteration.stageStats.npuLockWaitTimeMs},
+        {"npu_lock_hold_ms", iteration.stageStats.npuLockHoldTimeMs},
+        {"pipeline_call_ms", iteration.pipelineCallMs},
     };
 }
 
@@ -103,6 +243,10 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
         mean.unsupportedTimeMs += iteration.stageStats.unsupportedTimeMs;
         mean.readingOrderTimeMs += iteration.stageStats.readingOrderTimeMs;
         mean.outputGenTimeMs += iteration.stageStats.outputGenTimeMs;
+        mean.npuSerialTimeMs += iteration.stageStats.npuSerialTimeMs;
+        mean.cpuOnlyTimeMs += iteration.stageStats.cpuOnlyTimeMs;
+        mean.npuLockWaitTimeMs += iteration.stageStats.npuLockWaitTimeMs;
+        mean.npuLockHoldTimeMs += iteration.stageStats.npuLockHoldTimeMs;
     }
 
     const double denom = static_cast<double>(iterations.size());
@@ -115,20 +259,30 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
     mean.unsupportedTimeMs /= denom;
     mean.readingOrderTimeMs /= denom;
     mean.outputGenTimeMs /= denom;
+    mean.npuSerialTimeMs /= denom;
+    mean.cpuOnlyTimeMs /= denom;
+    mean.npuLockWaitTimeMs /= denom;
+    mean.npuLockHoldTimeMs /= denom;
     return mean;
 }
 
 BenchmarkIterationResult runOnce(DocPipeline& pipeline, const std::string& inputPath) {
+    const auto pipelineStart = std::chrono::steady_clock::now();
     const auto result = pipeline.processPdf(inputPath);
+    const auto pipelineEnd = std::chrono::steady_clock::now();
 
     BenchmarkIterationResult iteration;
     iteration.totalTimeMs = result.totalTimeMs;
+    iteration.pipelineCallMs =
+        std::chrono::duration<double, std::milli>(pipelineEnd - pipelineStart).count();
     iteration.processedPages = result.processedPages;
     iteration.stageStats = result.stats;
     iteration.pageTimesMs.reserve(result.pages.size());
     for (const auto& page : result.pages) {
         iteration.pageTimesMs.push_back(page.totalTimeMs);
     }
+    iteration.markdownSha256 = sha256::digest(result.markdown);
+    iteration.contentListSha256 = sha256::digest(result.contentListJson);
     return iteration;
 }
 
@@ -237,21 +391,40 @@ json buildJsonSummary(const BenchmarkCaseResult& result) {
     }
 
     std::vector<double> documentTotals;
+    std::vector<double> pipelineCallTotals;
     std::vector<double> allPageTotals;
+    std::set<std::string> markdownHashes;
+    std::set<std::string> contentListHashes;
     for (const auto& iteration : result.iterations) {
         documentTotals.push_back(iteration.totalTimeMs);
+        pipelineCallTotals.push_back(iteration.pipelineCallMs);
         allPageTotals.insert(allPageTotals.end(), iteration.pageTimesMs.begin(), iteration.pageTimesMs.end());
+        markdownHashes.insert(iteration.markdownSha256);
+        contentListHashes.insert(iteration.contentListSha256);
     }
 
     json rawIterations = json::array();
     for (const auto& iteration : result.iterations) {
         rawIterations.push_back(json{
             {"total_time_ms", iteration.totalTimeMs},
+            {"pipeline_call_ms", iteration.pipelineCallMs},
             {"processed_pages", iteration.processedPages},
             {"page_times_ms", iteration.pageTimesMs},
+            {"markdown_sha256", iteration.markdownSha256},
+            {"content_list_sha256", iteration.contentListSha256},
+            {"stats", benchmarkStatsToJson(iteration)},
             {"stage_stats", stageStatsToJson(iteration.stageStats)},
         });
     }
+
+    const auto documentSummary = summarizeSamples(documentTotals);
+    const auto pipelineCallSummary = summarizeSamples(pipelineCallTotals);
+    const auto pageSummary = summarizeSamples(allPageTotals);
+    const DocumentStageStats meanStages = meanStageStats(result.iterations);
+    BenchmarkIterationResult meanIteration;
+    meanIteration.totalTimeMs = documentSummary.meanMs;
+    meanIteration.pipelineCallMs = pipelineCallSummary.meanMs;
+    meanIteration.stageStats = meanStages;
 
     return json{
         {"name", result.definition.name},
@@ -260,9 +433,15 @@ json buildJsonSummary(const BenchmarkCaseResult& result) {
         {"warmup_iterations", result.warmupIterations},
         {"measured_iterations", result.iterations.size()},
         {"status", "ok"},
-        {"document_total", summaryToJson(summarizeSamples(documentTotals))},
-        {"page_total", summaryToJson(summarizeSamples(allPageTotals))},
-        {"mean_stage_breakdown", stageStatsToJson(meanStageStats(result.iterations))},
+        {"document_total", summaryToJson(documentSummary)},
+        {"pipeline_call", summaryToJson(pipelineCallSummary)},
+        {"page_total", summaryToJson(pageSummary)},
+        {"mean_stats", benchmarkStatsToJson(meanIteration)},
+        {"mean_stage_breakdown", stageStatsToJson(meanStages)},
+        {"markdown_sha256", markdownHashes.empty() ? std::string() : *markdownHashes.begin()},
+        {"markdown_hash_consistent", markdownHashes.size() <= 1},
+        {"content_list_sha256", contentListHashes.empty() ? std::string() : *contentListHashes.begin()},
+        {"content_list_hash_consistent", contentListHashes.size() <= 1},
         {"iterations", std::move(rawIterations)},
     };
 }
@@ -288,6 +467,10 @@ std::string buildHumanSummary(const json& summary) {
         << ", p95=" << formatMs(documentTotal.value("p95_ms", 0.0))
         << ", min=" << formatMs(documentTotal.value("min_ms", 0.0))
         << ", max=" << formatMs(documentTotal.value("max_ms", 0.0)) << "\n";
+    const auto& pipelineCall = summary.at("pipeline_call");
+    out << "  pipeline_call: mean=" << formatMs(pipelineCall.value("mean_ms", 0.0))
+        << ", p50=" << formatMs(pipelineCall.value("p50_ms", 0.0))
+        << ", p95=" << formatMs(pipelineCall.value("p95_ms", 0.0)) << "\n";
     out << "  page_total: samples=" << pageTotal.value("samples", 0)
         << ", mean=" << formatMs(pageTotal.value("mean_ms", 0.0))
         << ", p50=" << formatMs(pageTotal.value("p50_ms", 0.0))
@@ -302,12 +485,18 @@ std::string buildHumanSummary(const json& summary) {
         << ", layout=" << formatMs(stageBreakdown.value("layout_ms", 0.0))
         << ", ocr=" << formatMs(stageBreakdown.value("ocr_ms", 0.0))
         << ", table=" << formatMs(stageBreakdown.value("table_ms", 0.0))
+        << ", reading_order=" << formatMs(stageBreakdown.value("reading_order_ms", 0.0))
+        << ", output_gen=" << formatMs(stageBreakdown.value("output_gen_ms", 0.0))
+        << ", npu_serial=" << formatMs(stageBreakdown.value("npu_serial_ms", 0.0))
+        << ", cpu_only=" << formatMs(stageBreakdown.value("cpu_only_ms", 0.0))
+        << ", npu_lock_wait=" << formatMs(stageBreakdown.value("npu_lock_wait_ms", 0.0))
+        << ", npu_lock_hold=" << formatMs(stageBreakdown.value("npu_lock_hold_ms", 0.0))
         << ", figure=" << formatMs(stageBreakdown.value("figure_ms", 0.0))
         << ", formula=" << formatMs(stageBreakdown.value("formula_ms", 0.0))
         << ", unsupported=" << formatMs(stageBreakdown.value("unsupported_ms", 0.0))
-        << ", reading_order=" << formatMs(stageBreakdown.value("reading_order_ms", 0.0))
-        << ", output_gen=" << formatMs(stageBreakdown.value("output_gen_ms", 0.0))
         << "\n";
+    out << "  markdown_sha256: " << summary.value("markdown_sha256", "") << "\n";
+    out << "  content_list_sha256: " << summary.value("content_list_sha256", "") << "\n";
     return out.str();
 }
 

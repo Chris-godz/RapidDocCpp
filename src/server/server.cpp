@@ -444,6 +444,7 @@ json makeStatsJson(
         {"layout_ms", result.stats.layoutTimeMs},
         {"ocr_ms", result.stats.ocrTimeMs},
         {"table_ms", result.stats.tableTimeMs},
+        {"reading_order_ms", result.stats.readingOrderTimeMs},
         {"npu_serial_ms", result.stats.npuSerialTimeMs},
         {"cpu_only_ms", result.stats.cpuOnlyTimeMs},
         {"npu_lock_wait_ms", result.stats.npuLockWaitTimeMs},
@@ -1053,7 +1054,9 @@ void DocServer::run() {
                 msToUs(routed.processed.result.stats.npuSerialTimeMs),
                 std::memory_order_relaxed);
             shard.requestCount.fetch_add(1, std::memory_order_relaxed);
-            recordPipelineLockStats(routed.processed.result);
+            recordPipelineStats(
+                routed.processed.result,
+                routed.processed.pipelineCallTimeMs);
             shard.inflight.fetch_sub(1, std::memory_order_relaxed);
             return routed;
         } catch (...) {
@@ -1496,7 +1499,9 @@ std::string DocServer::handleProcess(const std::string& pdfData, const std::stri
             msToUs(routed.processed.result.stats.npuSerialTimeMs),
             std::memory_order_relaxed);
         shard.requestCount.fetch_add(1, std::memory_order_relaxed);
-        recordPipelineLockStats(routed.processed.result);
+        recordPipelineStats(
+            routed.processed.result,
+            routed.processed.pipelineCallTimeMs);
         shard.inflight.fetch_sub(1, std::memory_order_relaxed);
     } catch (...) {
         shard.inflight.fetch_sub(1, std::memory_order_relaxed);
@@ -1631,8 +1636,17 @@ std::string DocServer::buildStatusJson() {
             {"hold_max_ms", static_cast<double>(lockHoldUsMax_.load(std::memory_order_relaxed)) / 1000.0},
         }},
         {"pipeline_stage_totals", {
+            {"pipeline_call_ms", static_cast<double>(pipelineCallUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"pdf_render_ms", static_cast<double>(pdfRenderUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"layout_ms", static_cast<double>(layoutStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_ms", static_cast<double>(ocrStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"table_ms", static_cast<double>(tableStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"reading_order_ms", static_cast<double>(readingOrderStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"output_gen_ms", static_cast<double>(outputGenUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
             {"npu_serial_ms", static_cast<double>(npuStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
             {"cpu_only_ms", static_cast<double>(cpuStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"npu_lock_wait_ms", static_cast<double>(lockWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"npu_lock_hold_ms", static_cast<double>(lockHoldUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
         }},
         {"engines", makeEngineJson(
             config_.pipelineConfig.stages.enableWiredTable,
@@ -1652,15 +1666,29 @@ std::string DocServer::buildStatusJson() {
     return status.dump();
 }
 
-void DocServer::recordPipelineLockStats(const DocumentResult& result) {
+void DocServer::recordPipelineStats(const DocumentResult& result, double pipelineCallMs) {
     const uint64_t waitUs = msToUs(result.stats.npuLockWaitTimeMs);
     const uint64_t holdUs = msToUs(result.stats.npuLockHoldTimeMs);
+    const uint64_t pipelineCallUs = msToUs(pipelineCallMs);
+    const uint64_t pdfRenderUs = msToUs(result.stats.pdfRenderTimeMs);
+    const uint64_t layoutUs = msToUs(result.stats.layoutTimeMs);
+    const uint64_t ocrUs = msToUs(result.stats.ocrTimeMs);
+    const uint64_t tableUs = msToUs(result.stats.tableTimeMs);
+    const uint64_t readingOrderUs = msToUs(result.stats.readingOrderTimeMs);
+    const uint64_t outputGenUs = msToUs(result.stats.outputGenTimeMs);
     const uint64_t npuUs = msToUs(result.stats.npuSerialTimeMs);
     const uint64_t cpuUs = msToUs(result.stats.cpuOnlyTimeMs);
 
     lockSamples_.fetch_add(1, std::memory_order_relaxed);
     lockWaitUsTotal_.fetch_add(waitUs, std::memory_order_relaxed);
     lockHoldUsTotal_.fetch_add(holdUs, std::memory_order_relaxed);
+    pipelineCallUsTotal_.fetch_add(pipelineCallUs, std::memory_order_relaxed);
+    pdfRenderUsTotal_.fetch_add(pdfRenderUs, std::memory_order_relaxed);
+    layoutStageUsTotal_.fetch_add(layoutUs, std::memory_order_relaxed);
+    ocrStageUsTotal_.fetch_add(ocrUs, std::memory_order_relaxed);
+    tableStageUsTotal_.fetch_add(tableUs, std::memory_order_relaxed);
+    readingOrderStageUsTotal_.fetch_add(readingOrderUs, std::memory_order_relaxed);
+    outputGenUsTotal_.fetch_add(outputGenUs, std::memory_order_relaxed);
     npuStageUsTotal_.fetch_add(npuUs, std::memory_order_relaxed);
     cpuStageUsTotal_.fetch_add(cpuUs, std::memory_order_relaxed);
     updateAtomicMax(lockWaitUsMax_, waitUs);

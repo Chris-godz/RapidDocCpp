@@ -106,6 +106,13 @@ private:
     std::atomic<uint64_t> lockHoldUsTotal_{0};
     std::atomic<uint64_t> lockWaitUsMax_{0};
     std::atomic<uint64_t> lockHoldUsMax_{0};
+    std::atomic<uint64_t> pipelineCallUsTotal_{0};
+    std::atomic<uint64_t> pdfRenderUsTotal_{0};
+    std::atomic<uint64_t> layoutStageUsTotal_{0};
+    std::atomic<uint64_t> ocrStageUsTotal_{0};
+    std::atomic<uint64_t> tableStageUsTotal_{0};
+    std::atomic<uint64_t> readingOrderStageUsTotal_{0};
+    std::atomic<uint64_t> outputGenUsTotal_{0};
     std::atomic<uint64_t> npuStageUsTotal_{0};
     std::atomic<uint64_t> cpuStageUsTotal_{0};
 
@@ -115,7 +122,7 @@ private:
     size_t selectShardIndex();
     std::string buildStatusJson();
     std::string resolvedTopology() const;
-    void recordPipelineLockStats(const DocumentResult& result);
+    void recordPipelineStats(const DocumentResult& result, double pipelineCallMs);
 };
 
 } // namespace rapid_doc

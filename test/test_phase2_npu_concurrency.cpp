@@ -156,6 +156,12 @@ uint64_t hashJsonCanonical(const json& value) {
 }
 
 void assertPerRequestMetricsPresent(const json& stats) {
+    ASSERT_TRUE(stats.contains("pdf_render_ms"));
+    ASSERT_TRUE(stats.contains("layout_ms"));
+    ASSERT_TRUE(stats.contains("ocr_ms"));
+    ASSERT_TRUE(stats.contains("table_ms"));
+    ASSERT_TRUE(stats.contains("reading_order_ms"));
+    ASSERT_TRUE(stats.contains("output_gen_ms"));
     ASSERT_TRUE(stats.contains("npu_lock_wait_ms"));
     ASSERT_TRUE(stats.contains("npu_lock_hold_ms"));
     ASSERT_TRUE(stats.contains("npu_serial_ms"));
@@ -163,6 +169,12 @@ void assertPerRequestMetricsPresent(const json& stats) {
     ASSERT_TRUE(stats.contains("pipeline_call_ms"));
     ASSERT_TRUE(stats.contains("route_queue_ms"));
     ASSERT_TRUE(stats.contains("lb_proxy_ms"));
+    EXPECT_GE(stats.value("pdf_render_ms", -1.0), 0.0);
+    EXPECT_GE(stats.value("layout_ms", -1.0), 0.0);
+    EXPECT_GE(stats.value("ocr_ms", -1.0), 0.0);
+    EXPECT_GE(stats.value("table_ms", -1.0), 0.0);
+    EXPECT_GE(stats.value("reading_order_ms", -1.0), 0.0);
+    EXPECT_GE(stats.value("output_gen_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("npu_lock_wait_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("npu_lock_hold_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("npu_serial_ms", -1.0), 0.0);
@@ -415,8 +427,17 @@ TEST_F(NpuConcurrencyHttpIntegrationTest, two_concurrent_requests_report_npu_loc
     ASSERT_TRUE(status["pipeline_lock"].contains("samples"));
     EXPECT_GE(status["pipeline_lock"].value("samples", 0), 2);
     ASSERT_TRUE(status.contains("pipeline_stage_totals"));
+    EXPECT_GE(status["pipeline_stage_totals"].value("pipeline_call_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("pdf_render_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("layout_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("table_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("reading_order_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("output_gen_ms", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("npu_serial_ms", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("cpu_only_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("npu_lock_wait_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("npu_lock_hold_ms", -1.0), 0.0);
 }
 
 TEST_F(NpuConcurrencyHttpIntegrationTest, concurrent_page_range_keeps_ocr_isolated_between_requests) {
