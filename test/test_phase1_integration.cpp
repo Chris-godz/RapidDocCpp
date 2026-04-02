@@ -75,6 +75,20 @@ ocr::PipelineOCRResult makeOcrResult(const std::string& text) {
     return result;
 }
 
+TableCell makeCell(int row, int col, const std::string& content) {
+    TableCell cell{};
+    cell.row = row;
+    cell.col = col;
+    cell.rowSpan = 1;
+    cell.colSpan = 1;
+    cell.x0 = static_cast<float>(col * 20);
+    cell.y0 = static_cast<float>(row * 20);
+    cell.x1 = static_cast<float>((col + 1) * 20);
+    cell.y1 = static_cast<float>((row + 1) * 20);
+    cell.content = content;
+    return cell;
+}
+
 } // namespace
 
 TEST(Phase1Integration, unknown_layout_category_survives_pipeline) {
@@ -286,6 +300,171 @@ TEST(Phase1Integration, concurrent_ocr_results_do_not_cross_requests) {
 
     EXPECT_EQ(result100, "result-for-100");
     EXPECT_EQ(result200, "result-for-200");
+}
+
+TEST(Phase1Integration, duplicate_ocr_boxes_reuse_single_submission) {
+    struct FakeOcrBackend {
+        int submitCount = 0;
+        std::deque<std::tuple<int64_t, bool, std::vector<ocr::PipelineOCRResult>>> queue;
+
+        bool submit(const cv::Mat&, int64_t id) {
+            ++submitCount;
+            queue.push_back({
+                id,
+                true,
+                {makeOcrResult("ocr-" + std::to_string(submitCount))},
+            });
+            return true;
+        }
+
+        bool fetch(std::vector<ocr::PipelineOCRResult>& out, int64_t& id, bool& success) {
+            if (queue.empty()) {
+                return false;
+            }
+            auto item = std::move(queue.front());
+            queue.pop_front();
+            id = std::get<0>(item);
+            success = std::get<1>(item);
+            out = std::move(std::get<2>(item));
+            return true;
+        }
+    } fake;
+
+    auto cfg = makePdfOnlyPipelineConfig();
+    DocPipeline pipeline(cfg);
+    DocPipelineTestAccess::setOcrHooks(
+        pipeline,
+        [&fake](const cv::Mat& img, int64_t id) { return fake.submit(img, id); },
+        [&fake](std::vector<ocr::PipelineOCRResult>& out, int64_t& id, bool& success) {
+            return fake.fetch(out, id, success);
+        });
+
+    cv::Mat page(120, 120, CV_8UC3, cv::Scalar::all(255));
+    auto duplicateA = makeBox(LayoutCategory::TEXT, 10, 10, 40, 40);
+    duplicateA.confidence = 0.60f;
+    duplicateA.index = 9;
+    auto duplicateB = makeBox(LayoutCategory::TITLE, 10, 10, 40, 40);
+    duplicateB.confidence = 0.95f;
+    duplicateB.index = 3;
+    auto unique = makeBox(LayoutCategory::TEXT, 50, 50, 85, 85);
+    unique.index = 11;
+
+    const auto elements = DocPipelineTestAccess::runOcrOnRegions(
+        pipeline,
+        page,
+        {duplicateA, duplicateB, unique},
+        2);
+
+    ASSERT_EQ(elements.size(), 3u);
+    EXPECT_EQ(fake.submitCount, 2);
+
+    EXPECT_EQ(elements[0].text, "ocr-1");
+    EXPECT_EQ(elements[1].text, "ocr-1");
+    EXPECT_EQ(elements[2].text, "ocr-2");
+
+    EXPECT_EQ(elements[0].layoutBox.index, duplicateA.index);
+    EXPECT_EQ(elements[1].layoutBox.index, duplicateB.index);
+    EXPECT_EQ(elements[0].type, ContentElement::Type::TEXT);
+    EXPECT_EQ(elements[1].type, ContentElement::Type::TITLE);
+}
+
+TEST(Phase1Integration, invalid_ocr_roi_skips_submit_but_preserves_element) {
+    int submitCount = 0;
+
+    auto cfg = makePdfOnlyPipelineConfig();
+    DocPipeline pipeline(cfg);
+    DocPipelineTestAccess::setOcrHooks(
+        pipeline,
+        [&submitCount](const cv::Mat&, int64_t) {
+            ++submitCount;
+            return true;
+        },
+        [](std::vector<ocr::PipelineOCRResult>&, int64_t&, bool&) {
+            return false;
+        });
+
+    cv::Mat page(40, 40, CV_8UC3, cv::Scalar::all(255));
+    const auto elements = DocPipelineTestAccess::runOcrOnRegions(
+        pipeline,
+        page,
+        {makeBox(LayoutCategory::TEXT, 80, 80, 120, 120)},
+        0);
+
+    ASSERT_EQ(elements.size(), 1u);
+    EXPECT_EQ(submitCount, 0);
+    EXPECT_TRUE(elements[0].skipped);
+    EXPECT_TRUE(elements[0].text.empty());
+}
+
+TEST(Phase1Integration, duplicate_table_boxes_reuse_single_recognition) {
+    int recognizeCount = 0;
+
+    auto cfg = makePdfOnlyPipelineConfig();
+    cfg.stages.enableWiredTable = true;
+    cfg.stages.enableOcr = false;
+    DocPipeline pipeline(cfg);
+    DocPipelineTestAccess::setTableHooks(
+        pipeline,
+        [&recognizeCount](const cv::Mat&) {
+            ++recognizeCount;
+            TableResult result;
+            result.type = TableType::WIRED;
+            result.supported = true;
+            result.cells = {makeCell(0, 0, "cell-" + std::to_string(recognizeCount))};
+            return result;
+        },
+        [](const std::vector<TableCell>& cells) {
+            return "<table><tr><td>" + cells.front().content + "</td></tr></table>";
+        });
+
+    cv::Mat page(120, 120, CV_8UC3, cv::Scalar::all(255));
+    auto duplicateA = makeBox(LayoutCategory::TABLE, 5, 5, 70, 60);
+    duplicateA.index = 2;
+    auto duplicateB = makeBox(LayoutCategory::TABLE, 5, 5, 70, 60);
+    duplicateB.confidence = 0.99f;
+    duplicateB.index = 1;
+    auto unique = makeBox(LayoutCategory::TABLE, 70, 65, 110, 105);
+
+    const auto elements = DocPipelineTestAccess::runTableRecognition(
+        pipeline,
+        page,
+        {duplicateA, duplicateB, unique},
+        4);
+
+    ASSERT_EQ(elements.size(), 3u);
+    EXPECT_EQ(recognizeCount, 2);
+    EXPECT_EQ(elements[0].html, "<table><tr><td>cell-1</td></tr></table>");
+    EXPECT_EQ(elements[1].html, elements[0].html);
+    EXPECT_EQ(elements[2].html, "<table><tr><td>cell-2</td></tr></table>");
+    EXPECT_FALSE(elements[0].skipped);
+    EXPECT_FALSE(elements[1].skipped);
+}
+
+TEST(Phase1Integration, invalid_table_bbox_skips_recognition_but_preserves_element) {
+    int recognizeCount = 0;
+
+    auto cfg = makePdfOnlyPipelineConfig();
+    cfg.stages.enableWiredTable = true;
+    cfg.stages.enableOcr = false;
+    DocPipeline pipeline(cfg);
+    DocPipelineTestAccess::setTableHooks(
+        pipeline,
+        [&recognizeCount](const cv::Mat&) {
+            ++recognizeCount;
+            return TableResult{};
+        });
+
+    cv::Mat page(40, 40, CV_8UC3, cv::Scalar::all(255));
+    const auto elements = DocPipelineTestAccess::runTableRecognition(
+        pipeline,
+        page,
+        {makeBox(LayoutCategory::TABLE, 90, 90, 130, 130)},
+        1);
+
+    ASSERT_EQ(elements.size(), 1u);
+    EXPECT_EQ(recognizeCount, 0);
+    EXPECT_TRUE(elements[0].skipped);
+    EXPECT_EQ(elements[0].text, "[Unsupported table: invalid_table_bbox]");
 }
 
 TEST(Phase1Integration, handle_process_uses_request_unique_output_dir) {

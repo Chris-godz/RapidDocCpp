@@ -37,6 +37,7 @@ struct OcrWorkItem {
     float confidence = 0.0f;
     cv::Mat crop;
     bool skipped = false;
+    std::vector<size_t> originalIndices;
 };
 
 struct OcrFetchResult {
@@ -51,6 +52,7 @@ struct TableWorkItem {
     int pageIndex = 0;
     cv::Mat crop;
     bool invalidRoi = false;
+    std::vector<size_t> originalIndices;
 };
 
 struct TableNpuResult {
@@ -64,15 +66,94 @@ struct TableNpuResult {
     std::vector<ocr::PipelineOCRResult> ocrBoxes;
 };
 
+struct ExactRoiKey {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+
+    bool operator==(const ExactRoiKey& other) const {
+        return x == other.x &&
+               y == other.y &&
+               width == other.width &&
+               height == other.height;
+    }
+};
+
+struct ExactRoiKeyHasher {
+    size_t operator()(const ExactRoiKey& key) const {
+        size_t seed = static_cast<size_t>(key.x);
+        seed = (seed * 1315423911u) ^ static_cast<size_t>(key.y);
+        seed = (seed * 1315423911u) ^ static_cast<size_t>(key.width);
+        seed = (seed * 1315423911u) ^ static_cast<size_t>(key.height);
+        return seed;
+    }
+};
+
+struct ExactRoiGroup {
+    cv::Rect roi;
+    size_t canonicalIndex = 0;
+    std::vector<size_t> originalIndices;
+};
+
+bool prefersCanonicalBox(const LayoutBox& candidate, const LayoutBox& current) {
+    if (candidate.confidence != current.confidence) {
+        return candidate.confidence > current.confidence;
+    }
+    return candidate.index < current.index;
+}
+
+std::vector<ExactRoiGroup> groupExactRoiDuplicates(
+    const std::vector<LayoutBox>& boxes,
+    const cv::Size& imageSize)
+{
+    std::vector<ExactRoiGroup> groups;
+    std::unordered_map<ExactRoiKey, size_t, ExactRoiKeyHasher> groupByKey;
+    const cv::Rect bounds(0, 0, imageSize.width, imageSize.height);
+
+    for (size_t i = 0; i < boxes.size(); ++i) {
+        const cv::Rect roi = boxes[i].toRect() & bounds;
+        if (roi.width <= 0 || roi.height <= 0) {
+            ExactRoiGroup group;
+            group.roi = roi;
+            group.canonicalIndex = i;
+            group.originalIndices.push_back(i);
+            groups.push_back(std::move(group));
+            continue;
+        }
+
+        const ExactRoiKey key{roi.x, roi.y, roi.width, roi.height};
+        const auto [it, inserted] = groupByKey.emplace(key, groups.size());
+        if (inserted) {
+            ExactRoiGroup group;
+            group.roi = roi;
+            group.canonicalIndex = i;
+            group.originalIndices.push_back(i);
+            groups.push_back(std::move(group));
+            continue;
+        }
+
+        auto& group = groups[it->second];
+        group.originalIndices.push_back(i);
+        if (prefersCanonicalBox(boxes[i], boxes[group.canonicalIndex])) {
+            group.canonicalIndex = i;
+        }
+    }
+
+    return groups;
+}
+
 std::vector<OcrWorkItem> buildOcrWorkItems(
     const cv::Mat& image,
     const std::vector<LayoutBox>& textBoxes,
     int pageIndex)
 {
     std::vector<OcrWorkItem> items;
-    items.reserve(textBoxes.size());
+    const auto groups = groupExactRoiDuplicates(textBoxes, image.size());
+    items.reserve(groups.size());
 
-    for (const auto& box : textBoxes) {
+    for (const auto& group : groups) {
+        const auto& box = textBoxes[group.canonicalIndex];
         OcrWorkItem item;
         item.box = box;
         item.type = (box.category == LayoutCategory::TITLE)
@@ -80,13 +161,13 @@ std::vector<OcrWorkItem> buildOcrWorkItems(
                         : ContentElement::Type::TEXT;
         item.pageIndex = pageIndex;
         item.confidence = box.confidence;
+        item.originalIndices = group.originalIndices;
 
-        cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
-        if (roi.width <= 0 || roi.height <= 0) {
+        if (group.roi.width <= 0 || group.roi.height <= 0) {
             item.skipped = true;
         } else {
             // CPU-only crop clone: safe outside NPU serial lock.
-            item.crop = image(roi).clone();
+            item.crop = image(group.roi).clone();
         }
         items.push_back(std::move(item));
     }
@@ -605,9 +686,16 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     // OCR on text regions: move ROI crop, element assembly, and text concatenation to CPU-only.
     if (ctx.stages.enableOcr) {
         std::vector<OcrWorkItem> ocrWorkItems;
+        std::vector<size_t> ocrWorkItemForOriginal;
         {
             auto prepStart = std::chrono::steady_clock::now();
             ocrWorkItems = buildOcrWorkItems(image, textBoxes, pageImage.pageIndex);
+            ocrWorkItemForOriginal.assign(textBoxes.size(), 0);
+            for (size_t workIndex = 0; workIndex < ocrWorkItems.size(); ++workIndex) {
+                for (size_t originalIndex : ocrWorkItems[workIndex].originalIndices) {
+                    ocrWorkItemForOriginal[originalIndex] = workIndex;
+                }
+            }
             auto prepEnd = std::chrono::steady_clock::now();
             cpuOnlyTotalMs +=
                 std::chrono::duration<double, std::milli>(prepEnd - prepStart).count();
@@ -641,13 +729,17 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
 
         {
             auto assembleStart = std::chrono::steady_clock::now();
-            for (size_t i = 0; i < ocrWorkItems.size(); ++i) {
-                const auto& item = ocrWorkItems[i];
+            for (size_t originalIndex = 0; originalIndex < textBoxes.size(); ++originalIndex) {
+                const auto& box = textBoxes[originalIndex];
+                const size_t workIndex = ocrWorkItemForOriginal[originalIndex];
+                const auto& item = ocrWorkItems[workIndex];
                 ContentElement elem;
-                elem.type = item.type;
-                elem.layoutBox = item.box;
-                elem.confidence = item.confidence;
-                elem.pageIndex = item.pageIndex;
+                elem.type = (box.category == LayoutCategory::TITLE)
+                                ? ContentElement::Type::TITLE
+                                : ContentElement::Type::TEXT;
+                elem.layoutBox = box;
+                elem.confidence = box.confidence;
+                elem.pageIndex = pageImage.pageIndex;
 
                 if (item.skipped) {
                     elem.skipped = true;
@@ -655,7 +747,7 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                     continue;
                 }
 
-                const auto& fetch = fetchResults[i];
+                const auto& fetch = fetchResults[workIndex];
                 if (fetch.fetched && fetch.success && !fetch.results.empty()) {
                     elem.text = combineOcrTextLines(fetch.results);
                 }
@@ -670,19 +762,27 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     // Table recognition remains NPU-serialized.
     if (ctx.stages.enableWiredTable) {
         std::vector<TableWorkItem> tableWorkItems;
+        std::vector<size_t> tableWorkItemForOriginal;
         {
             auto prepStart = std::chrono::steady_clock::now();
-            tableWorkItems.reserve(tableBoxes.size());
-            for (const auto& box : tableBoxes) {
+            const auto groups = groupExactRoiDuplicates(tableBoxes, image.size());
+            tableWorkItems.reserve(groups.size());
+            tableWorkItemForOriginal.assign(tableBoxes.size(), 0);
+            for (const auto& group : groups) {
+                const auto& box = tableBoxes[group.canonicalIndex];
                 TableWorkItem item;
                 item.box = box;
                 item.pageIndex = pageImage.pageIndex;
-                cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
-                if (roi.width <= 0 || roi.height <= 0) {
+                item.originalIndices = group.originalIndices;
+                if (group.roi.width <= 0 || group.roi.height <= 0) {
                     item.invalidRoi = true;
                 } else {
                     // CPU-only crop clone: safe outside NPU serial lock.
-                    item.crop = image(roi).clone();
+                    item.crop = image(group.roi).clone();
+                }
+                const size_t workIndex = tableWorkItems.size();
+                for (size_t originalIndex : group.originalIndices) {
+                    tableWorkItemForOriginal[originalIndex] = workIndex;
                 }
                 tableWorkItems.push_back(std::move(item));
             }
@@ -801,10 +901,11 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
         std::vector<ContentElement> tableElements;
         {
             auto assembleStart = std::chrono::steady_clock::now();
-            tableElements.reserve(tableNpuResults.size());
+            std::vector<ContentElement> uniqueTableElements;
+            uniqueTableElements.reserve(tableNpuResults.size());
             for (auto& npuResult : tableNpuResults) {
                 if (npuResult.hasFallback) {
-                    tableElements.push_back(makeTableFallbackElement(
+                    uniqueTableElements.push_back(makeTableFallbackElement(
                         npuResult.box, npuResult.pageIndex, npuResult.fallbackReason));
                     continue;
                 }
@@ -821,18 +922,26 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                 } catch (const std::exception& ex) {
                     LOG_WARN("Illegal table structure at page {}: {}",
                              npuResult.pageIndex, ex.what());
-                    tableElements.push_back(makeTableFallbackElement(
+                    uniqueTableElements.push_back(makeTableFallbackElement(
                         npuResult.box, npuResult.pageIndex, "illegal_table_structure"));
                     continue;
                 }
 
                 if (elem.html.empty()) {
-                    tableElements.push_back(makeTableFallbackElement(
+                    uniqueTableElements.push_back(makeTableFallbackElement(
                         npuResult.box, npuResult.pageIndex, "empty_table_html"));
                     continue;
                 }
 
                 elem.skipped = false;
+                uniqueTableElements.push_back(std::move(elem));
+            }
+
+            tableElements.reserve(tableBoxes.size());
+            for (size_t originalIndex = 0; originalIndex < tableBoxes.size(); ++originalIndex) {
+                ContentElement elem = uniqueTableElements[tableWorkItemForOriginal[originalIndex]];
+                elem.layoutBox = tableBoxes[originalIndex];
+                elem.pageIndex = pageImage.pageIndex;
                 tableElements.push_back(std::move(elem));
             }
             auto assembleEnd = std::chrono::steady_clock::now();
@@ -1056,26 +1165,45 @@ std::vector<ContentElement> DocPipeline::runOcrOnRegions(
     int pageIndex)
 {
     std::vector<ContentElement> elements;
+    const auto ocrWorkItems = buildOcrWorkItems(image, textBoxes, pageIndex);
+    std::vector<std::string> texts(ocrWorkItems.size());
+    std::vector<bool> hasText(ocrWorkItems.size(), false);
+    std::vector<size_t> workIndexForOriginal(textBoxes.size(), 0);
 
+    for (size_t workIndex = 0; workIndex < ocrWorkItems.size(); ++workIndex) {
+        const auto& item = ocrWorkItems[workIndex];
+        for (size_t originalIndex : item.originalIndices) {
+            workIndexForOriginal[originalIndex] = workIndex;
+        }
+        if (item.skipped || item.crop.empty()) {
+            continue;
+        }
+        texts[workIndex] = ocrOnCrop(item.crop, allocateOcrTaskId());
+        hasText[workIndex] = !texts[workIndex].empty();
+    }
+
+    elements.reserve(textBoxes.size());
     for (size_t bi = 0; bi < textBoxes.size(); ++bi) {
         const auto& box = textBoxes[bi];
+        const auto& item = ocrWorkItems[workIndexForOriginal[bi]];
         ContentElement elem;
         elem.type = (box.category == LayoutCategory::TITLE)
-                    ? ContentElement::Type::TITLE
-                    : ContentElement::Type::TEXT;
+                        ? ContentElement::Type::TITLE
+                        : ContentElement::Type::TEXT;
         elem.layoutBox = box;
         elem.confidence = box.confidence;
         elem.pageIndex = pageIndex;
 
-        cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
-        if (roi.width <= 0 || roi.height <= 0) {
+        if (item.skipped) {
             elem.skipped = true;
-            elements.push_back(elem);
+            elements.push_back(std::move(elem));
             continue;
         }
 
-        elem.text = ocrOnCrop(image(roi).clone(), allocateOcrTaskId());
-        elements.push_back(elem);
+        if (hasText[workIndexForOriginal[bi]]) {
+            elem.text = texts[workIndexForOriginal[bi]];
+        }
+        elements.push_back(std::move(elem));
     }
 
     return elements;
@@ -1099,42 +1227,47 @@ std::vector<ContentElement> DocPipeline::runTableRecognition(
     const ExecutionContext& ctx)
 {
     std::vector<ContentElement> elements;
+    const auto groups = groupExactRoiDuplicates(tableBoxes, image.size());
+    std::vector<size_t> workIndexForOriginal(tableBoxes.size(), 0);
+    std::vector<ContentElement> uniqueElements;
+    uniqueElements.reserve(groups.size());
 
-    for (const auto& box : tableBoxes) {
+    for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
+        const auto& group = groups[groupIndex];
+        const auto& box = tableBoxes[group.canonicalIndex];
+        for (size_t originalIndex : group.originalIndices) {
+            workIndexForOriginal[originalIndex] = groupIndex;
+        }
+
+        if (group.roi.width <= 0 || group.roi.height <= 0) {
+            uniqueElements.push_back(makeTableFallbackElement(box, pageIndex, "invalid_table_bbox"));
+            continue;
+        }
+
         ContentElement elem;
         elem.type = ContentElement::Type::TABLE;
         elem.layoutBox = box;
         elem.pageIndex = pageIndex;
 
-        cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
-        if (roi.width <= 0 || roi.height <= 0) {
-            elements.push_back(makeTableFallbackElement(box, pageIndex, "invalid_table_bbox"));
-            continue;
-        }
-
-        cv::Mat tableCrop = image(roi);
-
+        cv::Mat tableCrop = image(group.roi).clone();
         TableResult tableResult = recognizeTable(tableCrop);
 
         if (!tableResult.supported) {
             const std::string reason = (tableResult.type == TableType::WIRELESS)
                                            ? "wireless_table"
                                            : "table_model_unavailable";
-            elements.push_back(makeTableFallbackElement(box, pageIndex, reason));
+            uniqueElements.push_back(makeTableFallbackElement(box, pageIndex, reason));
             continue;
         }
 
         if (tableResult.cells.empty()) {
-            elements.push_back(makeTableFallbackElement(box, pageIndex, "no_cell_table"));
+            uniqueElements.push_back(makeTableFallbackElement(box, pageIndex, "no_cell_table"));
             continue;
         }
 
-        // Match approach (like Python match_ocr_cell):
-        // 1. Run OCR on the FULL table image once
-        // 2. Match each OCR text box to the nearest cell by spatial overlap
         if (ctx.stages.enableOcr && (ocrPipeline_ || (ocrSubmitHook_ && ocrFetchHook_))) {
             const int64_t ocrTaskId = allocateOcrTaskId();
-            if (submitOcrTask(tableCrop.clone(), ocrTaskId)) {
+            if (submitOcrTask(tableCrop, ocrTaskId)) {
                 std::vector<ocr::PipelineOCRResult> ocrBoxes;
                 bool ok = false;
                 if (waitForOcrResult(ocrTaskId, ocrBoxes, ok) && ok && !ocrBoxes.empty()) {
@@ -1147,17 +1280,25 @@ std::vector<ContentElement> DocPipeline::runTableRecognition(
             elem.html = generateTableHtml(tableResult.cells);
         } catch (const std::exception& ex) {
             LOG_WARN("Illegal table structure at page {}: {}", pageIndex, ex.what());
-            elements.push_back(makeTableFallbackElement(box, pageIndex, "illegal_table_structure"));
+            uniqueElements.push_back(makeTableFallbackElement(box, pageIndex, "illegal_table_structure"));
             continue;
         }
 
         if (elem.html.empty()) {
-            elements.push_back(makeTableFallbackElement(box, pageIndex, "empty_table_html"));
+            uniqueElements.push_back(makeTableFallbackElement(box, pageIndex, "empty_table_html"));
             continue;
         }
 
         elem.skipped = false;
-        elements.push_back(elem);
+        uniqueElements.push_back(std::move(elem));
+    }
+
+    elements.reserve(tableBoxes.size());
+    for (size_t originalIndex = 0; originalIndex < tableBoxes.size(); ++originalIndex) {
+        ContentElement elem = uniqueElements[workIndexForOriginal[originalIndex]];
+        elem.layoutBox = tableBoxes[originalIndex];
+        elem.pageIndex = pageIndex;
+        elements.push_back(std::move(elem));
     }
 
     return elements;
