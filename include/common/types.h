@@ -150,6 +150,7 @@ struct PageImage {
     double scaleFactor;     // Scale relative to PDF coordinates
     int pdfWidth;           // Original PDF page width (points)
     int pdfHeight;          // Original PDF page height (points)
+    double renderTimeMs = 0.0; // Pure page render + color conversion time
 };
 
 /**

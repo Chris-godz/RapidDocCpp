@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
+#include <condition_variable>
+#include <deque>
 
 namespace fs = std::filesystem;
 
@@ -387,6 +389,125 @@ DocumentResult DocPipeline::processPdfWithOverrides(
     return processPdfInternal(pdfPath, makeExecutionContext(&overrides));
 }
 
+bool DocPipeline::shouldUsePdfStreaming(const ExecutionContext& ctx) const {
+    int requestedPages = 0;
+    if (ctx.runtime.maxPages > 0) {
+        requestedPages = ctx.runtime.maxPages;
+    } else if (ctx.runtime.endPageId >= ctx.runtime.startPageId &&
+               ctx.runtime.endPageId >= 0) {
+        requestedPages = ctx.runtime.endPageId - ctx.runtime.startPageId + 1;
+    }
+
+    return requestedPages <= 0 || requestedPages > 2;
+}
+
+DocumentResult DocPipeline::processRenderedPages(
+    std::vector<PageImage> pageImages,
+    const ExecutionContext& ctx)
+{
+    DocumentResult result;
+    result.totalPages = static_cast<int>(pageImages.size());
+
+    for (size_t i = 0; i < pageImages.size(); ++i) {
+        reportProgress(
+            "Processing",
+            static_cast<int>(i + 1),
+            static_cast<int>(pageImages.size()));
+        result.stats.pdfRenderTimeMs += pageImages[i].renderTimeMs;
+        PageResult pageResult = processPage(pageImages[i], ctx);
+        result.pages.push_back(std::move(pageResult));
+        result.processedPages++;
+    }
+
+    return result;
+}
+
+DocumentResult DocPipeline::processPdfStreaming(
+    PdfRenderer& renderer,
+    const std::function<bool(PdfRenderer&, const PdfRenderer::PageVisitor&)>& renderFn,
+    const ExecutionContext& ctx)
+{
+    DocumentResult result;
+
+    struct StreamState {
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::condition_variable space;
+        std::deque<PageImage> queue;
+        bool producerDone = false;
+        bool cancelled = false;
+        std::exception_ptr producerError;
+    } stream;
+
+    const size_t maxQueuedPages = static_cast<size_t>(std::max(2, ctx.runtime.maxConcurrentPages));
+    std::thread producer([&]() {
+        try {
+            renderFn(renderer, [&](PageImage&& page) {
+                std::unique_lock<std::mutex> lock(stream.mutex);
+                stream.space.wait(lock, [&]() {
+                    return stream.cancelled || stream.queue.size() < maxQueuedPages;
+                });
+                if (stream.cancelled) {
+                    return false;
+                }
+                stream.queue.push_back(std::move(page));
+                lock.unlock();
+                stream.ready.notify_one();
+                return true;
+            });
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(stream.mutex);
+            stream.producerError = std::current_exception();
+        }
+        {
+            std::lock_guard<std::mutex> lock(stream.mutex);
+            stream.producerDone = true;
+        }
+        stream.ready.notify_all();
+    });
+
+    try {
+        while (true) {
+            PageImage pageImage;
+            {
+                std::unique_lock<std::mutex> lock(stream.mutex);
+                stream.ready.wait(lock, [&]() {
+                    return !stream.queue.empty() || stream.producerDone;
+                });
+
+                if (stream.queue.empty()) {
+                    break;
+                }
+
+                pageImage = std::move(stream.queue.front());
+                stream.queue.pop_front();
+            }
+            stream.space.notify_one();
+
+            result.stats.pdfRenderTimeMs += pageImage.renderTimeMs;
+            PageResult pageResult = processPage(pageImage, ctx);
+            result.pages.push_back(std::move(pageResult));
+            result.processedPages++;
+            result.totalPages++;
+        }
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(stream.mutex);
+            stream.cancelled = true;
+        }
+        stream.space.notify_all();
+        producer.join();
+        throw;
+    }
+
+    producer.join();
+    if (stream.producerError) {
+        std::rethrow_exception(stream.producerError);
+    }
+
+    return result;
+}
+
 DocumentResult DocPipeline::processPdfInternal(
     const std::string& pdfPath,
     const ExecutionContext& ctx)
@@ -402,9 +523,6 @@ DocumentResult DocPipeline::processPdfInternal(
     }
 
     reportProgress("PDF Render", 0, 1);
-    auto renderStart = std::chrono::steady_clock::now();
-
-    std::vector<PageImage> pageImages;
     if (ctx.stages.enablePdfRender) {
         PdfRenderConfig pdfCfg;
         pdfCfg.dpi = ctx.runtime.pdfDpi;
@@ -413,28 +531,24 @@ DocumentResult DocPipeline::processPdfInternal(
         pdfCfg.endPageId = ctx.runtime.endPageId;
         pdfCfg.maxConcurrentRenders = ctx.runtime.maxConcurrentPages;
         PdfRenderer renderer(pdfCfg);
-        pageImages = renderer.renderFile(pdfPath);
+        if (shouldUsePdfStreaming(ctx)) {
+            result = processPdfStreaming(
+                renderer,
+                [&pdfPath](PdfRenderer& activeRenderer, const PdfRenderer::PageVisitor& visitor) {
+                    return activeRenderer.renderFileStreaming(pdfPath, visitor);
+                },
+                ctx);
+        } else {
+            result = processRenderedPages(renderer.renderFile(pdfPath), ctx);
+        }
     }
 
-    auto renderEnd = std::chrono::steady_clock::now();
-    result.stats.pdfRenderTimeMs =
-        std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
-    result.totalPages = static_cast<int>(pageImages.size());
-
-    if (pageImages.empty()) {
+    if (result.pages.empty()) {
         LOG_WARN("No pages rendered from PDF");
         return result;
     }
 
-    LOG_INFO("Rendered {} pages from PDF", pageImages.size());
-
-    for (size_t i = 0; i < pageImages.size(); i++) {
-        reportProgress("Processing", static_cast<int>(i + 1), static_cast<int>(pageImages.size()));
-
-        PageResult pageResult = processPage(pageImages[i], ctx);
-        result.pages.push_back(std::move(pageResult));
-        result.processedPages++;
-    }
+    LOG_INFO("Rendered {} pages from PDF", result.pages.size());
 
     finalizeDocumentStats(result);
 
@@ -490,8 +604,6 @@ DocumentResult DocPipeline::processPdfFromMemoryInternal(
 
     auto startTime = std::chrono::steady_clock::now();
 
-    std::vector<PageImage> pageImages;
-    auto renderStart = std::chrono::steady_clock::now();
     if (ctx.stages.enablePdfRender) {
         PdfRenderConfig pdfCfg;
         pdfCfg.dpi = ctx.runtime.pdfDpi;
@@ -500,18 +612,16 @@ DocumentResult DocPipeline::processPdfFromMemoryInternal(
         pdfCfg.endPageId = ctx.runtime.endPageId;
         pdfCfg.maxConcurrentRenders = ctx.runtime.maxConcurrentPages;
         PdfRenderer renderer(pdfCfg);
-        pageImages = renderer.renderFromMemory(data, size);
-    }
-    auto renderEnd = std::chrono::steady_clock::now();
-
-    result.stats.pdfRenderTimeMs =
-        std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
-    result.totalPages = static_cast<int>(pageImages.size());
-
-    for (size_t i = 0; i < pageImages.size(); i++) {
-        PageResult pageResult = processPage(pageImages[i], ctx);
-        result.pages.push_back(std::move(pageResult));
-        result.processedPages++;
+        if (shouldUsePdfStreaming(ctx)) {
+            result = processPdfStreaming(
+                renderer,
+                [data, size](PdfRenderer& activeRenderer, const PdfRenderer::PageVisitor& visitor) {
+                    return activeRenderer.renderFromMemoryStreaming(data, size, visitor);
+                },
+                ctx);
+        } else {
+            result = processRenderedPages(renderer.renderFromMemory(data, size), ctx);
+        }
     }
 
     finalizeDocumentStats(result);

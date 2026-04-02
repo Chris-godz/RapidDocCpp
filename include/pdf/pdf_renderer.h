@@ -15,6 +15,7 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <functional>
 
 namespace rapid_doc {
 
@@ -36,6 +37,8 @@ struct PdfRenderConfig {
  */
 class PdfRenderer {
 public:
+    using PageVisitor = std::function<bool(PageImage&&)>;
+
     explicit PdfRenderer(const PdfRenderConfig& config = {});
     ~PdfRenderer();
 
@@ -45,6 +48,7 @@ public:
      * @return Vector of rendered page images
      */
     std::vector<PageImage> renderFile(const std::string& pdfPath);
+    bool renderFileStreaming(const std::string& pdfPath, const PageVisitor& visitor);
 
     /**
      * @brief Render all pages from PDF data in memory
@@ -53,6 +57,7 @@ public:
      * @return Vector of rendered page images
      */
     std::vector<PageImage> renderFromMemory(const uint8_t* data, size_t size);
+    bool renderFromMemoryStreaming(const uint8_t* data, size_t size, const PageVisitor& visitor);
 
     /**
      * @brief Get total page count without rendering

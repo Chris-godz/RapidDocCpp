@@ -282,6 +282,14 @@ private:
     ExecutionContext makeExecutionContext(const PipelineRunOverrides* overrides) const;
     void resetOcrTransientStateForRun();
     std::mutex& npuSerialMutex();
+    bool shouldUsePdfStreaming(const ExecutionContext& ctx) const;
+    DocumentResult processRenderedPages(
+        std::vector<PageImage> pageImages,
+        const ExecutionContext& ctx);
+    DocumentResult processPdfStreaming(
+        PdfRenderer& renderer,
+        const std::function<bool(PdfRenderer&, const PdfRenderer::PageVisitor&)>& renderFn,
+        const ExecutionContext& ctx);
     DocumentResult processPdfInternal(const std::string& pdfPath, const ExecutionContext& ctx);
     DocumentResult processPdfFromMemoryInternal(
         const uint8_t* data, size_t size, const ExecutionContext& ctx);
