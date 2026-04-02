@@ -32,6 +32,16 @@ void accumulatePageStats(PageStageStats& target, const PageStageStats& source) {
     target.cpuOnlyTimeMs += source.cpuOnlyTimeMs;
     target.npuLockWaitTimeMs += source.npuLockWaitTimeMs;
     target.npuLockHoldTimeMs += source.npuLockHoldTimeMs;
+    target.textBoxesRawCount += source.textBoxesRawCount;
+    target.textBoxesAfterDedupCount += source.textBoxesAfterDedupCount;
+    target.tableBoxesRawCount += source.tableBoxesRawCount;
+    target.tableBoxesAfterDedupCount += source.tableBoxesAfterDedupCount;
+    target.ocrSubmitCount += source.ocrSubmitCount;
+    target.ocrDedupSkippedCount += source.ocrDedupSkippedCount;
+    target.tableNpuSubmitCount += source.tableNpuSubmitCount;
+    target.tableDedupSkippedCount += source.tableDedupSkippedCount;
+    target.ocrTimeoutCount += source.ocrTimeoutCount;
+    target.ocrBufferedResultHitCount += source.ocrBufferedResultHitCount;
 }
 
 } // namespace

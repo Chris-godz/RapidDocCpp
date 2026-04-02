@@ -167,6 +167,16 @@ void assertPerRequestMetricsPresent(const json& stats) {
     ASSERT_TRUE(stats.contains("npu_serial_ms"));
     ASSERT_TRUE(stats.contains("cpu_only_ms"));
     ASSERT_TRUE(stats.contains("pipeline_call_ms"));
+    ASSERT_TRUE(stats.contains("text_boxes_raw_count"));
+    ASSERT_TRUE(stats.contains("text_boxes_after_dedup_count"));
+    ASSERT_TRUE(stats.contains("table_boxes_raw_count"));
+    ASSERT_TRUE(stats.contains("table_boxes_after_dedup_count"));
+    ASSERT_TRUE(stats.contains("ocr_submit_count"));
+    ASSERT_TRUE(stats.contains("ocr_dedup_skipped_count"));
+    ASSERT_TRUE(stats.contains("table_npu_submit_count"));
+    ASSERT_TRUE(stats.contains("table_dedup_skipped_count"));
+    ASSERT_TRUE(stats.contains("ocr_timeout_count"));
+    ASSERT_TRUE(stats.contains("ocr_buffered_result_hit_count"));
     ASSERT_TRUE(stats.contains("route_queue_ms"));
     ASSERT_TRUE(stats.contains("lb_proxy_ms"));
     EXPECT_GE(stats.value("pdf_render_ms", -1.0), 0.0);
@@ -180,6 +190,16 @@ void assertPerRequestMetricsPresent(const json& stats) {
     EXPECT_GE(stats.value("npu_serial_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("cpu_only_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("pipeline_call_ms", -1.0), 0.0);
+    EXPECT_GE(stats.value("text_boxes_raw_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("text_boxes_after_dedup_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("table_boxes_raw_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("table_boxes_after_dedup_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("ocr_submit_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("ocr_dedup_skipped_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("table_npu_submit_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("table_dedup_skipped_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("ocr_timeout_count", -1.0), 0.0);
+    EXPECT_GE(stats.value("ocr_buffered_result_hit_count", -1.0), 0.0);
     EXPECT_GE(stats.value("route_queue_ms", -1.0), 0.0);
     EXPECT_GE(stats.value("lb_proxy_ms", -1.0), 0.0);
 }
@@ -438,6 +458,16 @@ TEST_F(NpuConcurrencyHttpIntegrationTest, two_concurrent_requests_report_npu_loc
     EXPECT_GE(status["pipeline_stage_totals"].value("cpu_only_ms", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("npu_lock_wait_ms", -1.0), 0.0);
     EXPECT_GE(status["pipeline_stage_totals"].value("npu_lock_hold_ms", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("text_boxes_raw_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("text_boxes_after_dedup_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("table_boxes_raw_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("table_boxes_after_dedup_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_submit_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_dedup_skipped_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("table_npu_submit_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("table_dedup_skipped_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_timeout_count", -1.0), 0.0);
+    EXPECT_GE(status["pipeline_stage_totals"].value("ocr_buffered_result_hit_count", -1.0), 0.0);
 }
 
 TEST_F(NpuConcurrencyHttpIntegrationTest, concurrent_page_range_keeps_ocr_isolated_between_requests) {

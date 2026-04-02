@@ -204,6 +204,17 @@ struct PageStageStats {
     double cpuOnlyTimeMs = 0.0;
     double npuLockWaitTimeMs = 0.0;
     double npuLockHoldTimeMs = 0.0;
+    // Phase 1 attribution counters (additive fields).
+    double textBoxesRawCount = 0.0;
+    double textBoxesAfterDedupCount = 0.0;
+    double tableBoxesRawCount = 0.0;
+    double tableBoxesAfterDedupCount = 0.0;
+    double ocrSubmitCount = 0.0;
+    double ocrDedupSkippedCount = 0.0;
+    double tableNpuSubmitCount = 0.0;
+    double tableDedupSkippedCount = 0.0;
+    double ocrTimeoutCount = 0.0;
+    double ocrBufferedResultHitCount = 0.0;
 };
 
 /**

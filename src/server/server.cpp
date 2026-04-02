@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -308,6 +309,13 @@ uint64_t msToUs(double ms) {
     return static_cast<uint64_t>(ms * 1000.0);
 }
 
+uint64_t countToUInt(double value) {
+    if (value <= 0.0) {
+        return 0;
+    }
+    return static_cast<uint64_t>(std::llround(value));
+}
+
 void updateAtomicMax(std::atomic<uint64_t>& target, uint64_t value) {
     uint64_t current = target.load(std::memory_order_relaxed);
     while (current < value &&
@@ -450,6 +458,16 @@ json makeStatsJson(
         {"npu_lock_wait_ms", result.stats.npuLockWaitTimeMs},
         {"npu_lock_hold_ms", result.stats.npuLockHoldTimeMs},
         {"output_gen_ms", result.stats.outputGenTimeMs},
+        {"text_boxes_raw_count", result.stats.textBoxesRawCount},
+        {"text_boxes_after_dedup_count", result.stats.textBoxesAfterDedupCount},
+        {"table_boxes_raw_count", result.stats.tableBoxesRawCount},
+        {"table_boxes_after_dedup_count", result.stats.tableBoxesAfterDedupCount},
+        {"ocr_submit_count", result.stats.ocrSubmitCount},
+        {"ocr_dedup_skipped_count", result.stats.ocrDedupSkippedCount},
+        {"table_npu_submit_count", result.stats.tableNpuSubmitCount},
+        {"table_dedup_skipped_count", result.stats.tableDedupSkippedCount},
+        {"ocr_timeout_count", result.stats.ocrTimeoutCount},
+        {"ocr_buffered_result_hit_count", result.stats.ocrBufferedResultHitCount},
     };
 
     if (pipelineCallMs.has_value()) {
@@ -1651,6 +1669,16 @@ std::string DocServer::buildStatusJson() {
             {"cpu_only_ms", static_cast<double>(cpuStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
             {"npu_lock_wait_ms", static_cast<double>(lockWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
             {"npu_lock_hold_ms", static_cast<double>(lockHoldUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"text_boxes_raw_count", textBoxesRawCountTotal_.load(std::memory_order_relaxed)},
+            {"text_boxes_after_dedup_count", textBoxesAfterDedupCountTotal_.load(std::memory_order_relaxed)},
+            {"table_boxes_raw_count", tableBoxesRawCountTotal_.load(std::memory_order_relaxed)},
+            {"table_boxes_after_dedup_count", tableBoxesAfterDedupCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_submit_count", ocrSubmitCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_dedup_skipped_count", ocrDedupSkippedCountTotal_.load(std::memory_order_relaxed)},
+            {"table_npu_submit_count", tableNpuSubmitCountTotal_.load(std::memory_order_relaxed)},
+            {"table_dedup_skipped_count", tableDedupSkippedCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_timeout_count", ocrTimeoutCountTotal_.load(std::memory_order_relaxed)},
+            {"ocr_buffered_result_hit_count", ocrBufferedResultHitCountTotal_.load(std::memory_order_relaxed)},
         }},
         {"engines", makeEngineJson(
             config_.pipelineConfig.stages.enableWiredTable,
@@ -1682,6 +1710,17 @@ void DocServer::recordPipelineStats(const DocumentResult& result, double pipelin
     const uint64_t outputGenUs = msToUs(result.stats.outputGenTimeMs);
     const uint64_t npuUs = msToUs(result.stats.npuSerialTimeMs);
     const uint64_t cpuUs = msToUs(result.stats.cpuOnlyTimeMs);
+    const uint64_t textBoxesRawCount = countToUInt(result.stats.textBoxesRawCount);
+    const uint64_t textBoxesAfterDedupCount = countToUInt(result.stats.textBoxesAfterDedupCount);
+    const uint64_t tableBoxesRawCount = countToUInt(result.stats.tableBoxesRawCount);
+    const uint64_t tableBoxesAfterDedupCount = countToUInt(result.stats.tableBoxesAfterDedupCount);
+    const uint64_t ocrSubmitCount = countToUInt(result.stats.ocrSubmitCount);
+    const uint64_t ocrDedupSkippedCount = countToUInt(result.stats.ocrDedupSkippedCount);
+    const uint64_t tableNpuSubmitCount = countToUInt(result.stats.tableNpuSubmitCount);
+    const uint64_t tableDedupSkippedCount = countToUInt(result.stats.tableDedupSkippedCount);
+    const uint64_t ocrTimeoutCount = countToUInt(result.stats.ocrTimeoutCount);
+    const uint64_t ocrBufferedResultHitCount =
+        countToUInt(result.stats.ocrBufferedResultHitCount);
 
     lockSamples_.fetch_add(1, std::memory_order_relaxed);
     lockWaitUsTotal_.fetch_add(waitUs, std::memory_order_relaxed);
@@ -1695,6 +1734,19 @@ void DocServer::recordPipelineStats(const DocumentResult& result, double pipelin
     outputGenUsTotal_.fetch_add(outputGenUs, std::memory_order_relaxed);
     npuStageUsTotal_.fetch_add(npuUs, std::memory_order_relaxed);
     cpuStageUsTotal_.fetch_add(cpuUs, std::memory_order_relaxed);
+    textBoxesRawCountTotal_.fetch_add(textBoxesRawCount, std::memory_order_relaxed);
+    textBoxesAfterDedupCountTotal_.fetch_add(
+        textBoxesAfterDedupCount, std::memory_order_relaxed);
+    tableBoxesRawCountTotal_.fetch_add(tableBoxesRawCount, std::memory_order_relaxed);
+    tableBoxesAfterDedupCountTotal_.fetch_add(
+        tableBoxesAfterDedupCount, std::memory_order_relaxed);
+    ocrSubmitCountTotal_.fetch_add(ocrSubmitCount, std::memory_order_relaxed);
+    ocrDedupSkippedCountTotal_.fetch_add(ocrDedupSkippedCount, std::memory_order_relaxed);
+    tableNpuSubmitCountTotal_.fetch_add(tableNpuSubmitCount, std::memory_order_relaxed);
+    tableDedupSkippedCountTotal_.fetch_add(tableDedupSkippedCount, std::memory_order_relaxed);
+    ocrTimeoutCountTotal_.fetch_add(ocrTimeoutCount, std::memory_order_relaxed);
+    ocrBufferedResultHitCountTotal_.fetch_add(
+        ocrBufferedResultHitCount, std::memory_order_relaxed);
     updateAtomicMax(lockWaitUsMax_, waitUs);
     updateAtomicMax(lockHoldUsMax_, holdUs);
 }

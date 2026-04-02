@@ -744,6 +744,16 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     double npuLockHoldTotalMs = 0.0;
     double npuSerialTotalMs = 0.0;
     double cpuOnlyTotalMs = 0.0;
+    size_t textBoxesRawCount = 0;
+    size_t textBoxesAfterDedupCount = 0;
+    size_t tableBoxesRawCount = 0;
+    size_t tableBoxesAfterDedupCount = 0;
+    size_t ocrSubmitCount = 0;
+    size_t ocrDedupSkippedCount = 0;
+    size_t tableNpuSubmitCount = 0;
+    size_t tableDedupSkippedCount = 0;
+    size_t ocrTimeoutCount = 0;
+    size_t ocrBufferedResultHitCount = 0;
 
     auto runNpuSerialized = [&](auto&& fn) -> double {
         auto lockWaitStart = std::chrono::steady_clock::now();
@@ -787,6 +797,8 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
         figureBoxes = result.layoutResult.getBoxesByCategory(LayoutCategory::FIGURE);
         equationBoxes = result.layoutResult.getEquationBoxes();
         unsupportedBoxes = result.layoutResult.getUnsupportedBoxes();
+        textBoxesRawCount = textBoxes.size();
+        tableBoxesRawCount = tableBoxes.size();
         auto bucketEnd = std::chrono::steady_clock::now();
         cpuOnlyTotalMs +=
             std::chrono::duration<double, std::milli>(bucketEnd - bucketStart).count();
@@ -799,6 +811,10 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
         {
             auto prepStart = std::chrono::steady_clock::now();
             ocrWorkItems = buildOcrWorkItems(image, textBoxes, pageImage.pageIndex);
+            textBoxesAfterDedupCount = ocrWorkItems.size();
+            if (textBoxesRawCount > textBoxesAfterDedupCount) {
+                ocrDedupSkippedCount += (textBoxesRawCount - textBoxesAfterDedupCount);
+            }
             ocrWorkItemForOriginal.assign(textBoxes.size(), 0);
             for (size_t workIndex = 0; workIndex < ocrWorkItems.size(); ++workIndex) {
                 for (size_t originalIndex : ocrWorkItems[workIndex].originalIndices) {
@@ -829,8 +845,15 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                 if (!fetch.submitted) {
                     continue;
                 }
-                fetch.fetched = waitForOcrResult(taskId, fetch.results, fetch.success);
+                ++ocrSubmitCount;
+                bool bufferedHit = false;
+                fetch.fetched =
+                    waitForOcrResult(taskId, fetch.results, fetch.success, &bufferedHit);
+                if (bufferedHit) {
+                    ++ocrBufferedResultHitCount;
+                }
                 if (!fetch.fetched) {
+                    ++ocrTimeoutCount;
                     LOG_WARN("OCR timeout for task {}", taskId);
                 }
             }
@@ -894,6 +917,10 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                 }
                 tableWorkItems.push_back(std::move(item));
             }
+            tableBoxesAfterDedupCount = tableWorkItems.size();
+            if (tableBoxesRawCount > tableBoxesAfterDedupCount) {
+                tableDedupSkippedCount += (tableBoxesRawCount - tableBoxesAfterDedupCount);
+            }
             auto prepEnd = std::chrono::steady_clock::now();
             cpuOnlyTotalMs +=
                 std::chrono::duration<double, std::milli>(prepEnd - prepStart).count();
@@ -913,6 +940,7 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
                     tableNpuResults.push_back(std::move(npuResult));
                     continue;
                 }
+                ++tableNpuSubmitCount;
 
                 if (tableRecognizeHook_) {
                     npuResult.tableResult = recognizeTable(item.crop);
@@ -995,8 +1023,18 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
 
                     const int64_t ocrTaskId = allocateOcrTaskId();
                     if (submitOcrTask(tableWorkItems[i].crop, ocrTaskId)) {
+                        ++ocrSubmitCount;
                         bool ok = false;
-                        if (!(waitForOcrResult(ocrTaskId, npuResult.ocrBoxes, ok) && ok)) {
+                        bool bufferedHit = false;
+                        const bool fetched = waitForOcrResult(
+                            ocrTaskId, npuResult.ocrBoxes, ok, &bufferedHit);
+                        if (bufferedHit) {
+                            ++ocrBufferedResultHitCount;
+                        }
+                        if (!(fetched && ok)) {
+                            if (!fetched) {
+                                ++ocrTimeoutCount;
+                            }
                             npuResult.ocrBoxes.clear();
                         }
                     }
@@ -1063,6 +1101,16 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     result.stats.npuLockWaitTimeMs = npuLockWaitTotalMs;
     result.stats.npuLockHoldTimeMs = npuLockHoldTotalMs;
     result.stats.npuSerialTimeMs = npuSerialTotalMs;
+    result.stats.textBoxesRawCount = static_cast<double>(textBoxesRawCount);
+    result.stats.textBoxesAfterDedupCount = static_cast<double>(textBoxesAfterDedupCount);
+    result.stats.tableBoxesRawCount = static_cast<double>(tableBoxesRawCount);
+    result.stats.tableBoxesAfterDedupCount = static_cast<double>(tableBoxesAfterDedupCount);
+    result.stats.ocrSubmitCount = static_cast<double>(ocrSubmitCount);
+    result.stats.ocrDedupSkippedCount = static_cast<double>(ocrDedupSkippedCount);
+    result.stats.tableNpuSubmitCount = static_cast<double>(tableNpuSubmitCount);
+    result.stats.tableDedupSkippedCount = static_cast<double>(tableDedupSkippedCount);
+    result.stats.ocrTimeoutCount = static_cast<double>(ocrTimeoutCount);
+    result.stats.ocrBufferedResultHitCount = static_cast<double>(ocrBufferedResultHitCount);
 
     // CPU-only region (safe to execute outside NPU serial lock).
     auto cpuStart = std::chrono::steady_clock::now();
@@ -1185,10 +1233,14 @@ bool DocPipeline::fetchOcrResult(
 bool DocPipeline::waitForOcrResult(
     int64_t taskId,
     std::vector<ocr::PipelineOCRResult>& results,
-    bool& success)
+    bool& success,
+    bool* bufferedHit)
 {
     results.clear();
     success = false;
+    if (bufferedHit != nullptr) {
+        *bufferedHit = false;
+    }
 
     {
         std::lock_guard<std::mutex> lock(ocrStateMutex_);
@@ -1213,6 +1265,9 @@ bool DocPipeline::waitForOcrResult(
 
         auto buffered = bufferedOcrResults_.find(taskId);
         if (buffered != bufferedOcrResults_.end()) {
+            if (bufferedHit != nullptr) {
+                *bufferedHit = true;
+            }
             results = std::move(buffered->second.results);
             success = buffered->second.success;
             bufferedOcrResults_.erase(buffered);

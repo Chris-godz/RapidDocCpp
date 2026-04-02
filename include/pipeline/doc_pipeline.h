@@ -264,7 +264,8 @@ private:
     bool waitForOcrResult(
         int64_t taskId,
         std::vector<ocr::PipelineOCRResult>& results,
-        bool& success);
+        bool& success,
+        bool* bufferedHit = nullptr);
     int64_t allocateOcrTaskId();
 
     TableResult recognizeTable(const cv::Mat& tableCrop);

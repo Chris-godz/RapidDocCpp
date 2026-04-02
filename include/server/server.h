@@ -115,6 +115,16 @@ private:
     std::atomic<uint64_t> outputGenUsTotal_{0};
     std::atomic<uint64_t> npuStageUsTotal_{0};
     std::atomic<uint64_t> cpuStageUsTotal_{0};
+    std::atomic<uint64_t> textBoxesRawCountTotal_{0};
+    std::atomic<uint64_t> textBoxesAfterDedupCountTotal_{0};
+    std::atomic<uint64_t> tableBoxesRawCountTotal_{0};
+    std::atomic<uint64_t> tableBoxesAfterDedupCountTotal_{0};
+    std::atomic<uint64_t> ocrSubmitCountTotal_{0};
+    std::atomic<uint64_t> ocrDedupSkippedCountTotal_{0};
+    std::atomic<uint64_t> tableNpuSubmitCountTotal_{0};
+    std::atomic<uint64_t> tableDedupSkippedCountTotal_{0};
+    std::atomic<uint64_t> ocrTimeoutCountTotal_{0};
+    std::atomic<uint64_t> ocrBufferedResultHitCountTotal_{0};
 
     // Internal handlers
     void setupRoutes();

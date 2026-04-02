@@ -67,6 +67,12 @@ std::string formatMs(double value) {
     return out.str();
 }
 
+std::string formatCount(double value) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2) << value;
+    return out.str();
+}
+
 namespace sha256 {
 
 constexpr std::array<uint32_t, 64> kRoundConstants = {
@@ -206,6 +212,16 @@ json stageStatsToJson(const DocumentStageStats& stats) {
         {"cpu_only_ms", stats.cpuOnlyTimeMs},
         {"npu_lock_wait_ms", stats.npuLockWaitTimeMs},
         {"npu_lock_hold_ms", stats.npuLockHoldTimeMs},
+        {"text_boxes_raw_count", stats.textBoxesRawCount},
+        {"text_boxes_after_dedup_count", stats.textBoxesAfterDedupCount},
+        {"table_boxes_raw_count", stats.tableBoxesRawCount},
+        {"table_boxes_after_dedup_count", stats.tableBoxesAfterDedupCount},
+        {"ocr_submit_count", stats.ocrSubmitCount},
+        {"ocr_dedup_skipped_count", stats.ocrDedupSkippedCount},
+        {"table_npu_submit_count", stats.tableNpuSubmitCount},
+        {"table_dedup_skipped_count", stats.tableDedupSkippedCount},
+        {"ocr_timeout_count", stats.ocrTimeoutCount},
+        {"ocr_buffered_result_hit_count", stats.ocrBufferedResultHitCount},
         {"tracked_total_ms", totalTrackedStageTimeMs(stats)},
     };
 }
@@ -223,6 +239,16 @@ json benchmarkStatsToJson(const BenchmarkIterationResult& iteration) {
         {"cpu_only_ms", iteration.stageStats.cpuOnlyTimeMs},
         {"npu_lock_wait_ms", iteration.stageStats.npuLockWaitTimeMs},
         {"npu_lock_hold_ms", iteration.stageStats.npuLockHoldTimeMs},
+        {"text_boxes_raw_count", iteration.stageStats.textBoxesRawCount},
+        {"text_boxes_after_dedup_count", iteration.stageStats.textBoxesAfterDedupCount},
+        {"table_boxes_raw_count", iteration.stageStats.tableBoxesRawCount},
+        {"table_boxes_after_dedup_count", iteration.stageStats.tableBoxesAfterDedupCount},
+        {"ocr_submit_count", iteration.stageStats.ocrSubmitCount},
+        {"ocr_dedup_skipped_count", iteration.stageStats.ocrDedupSkippedCount},
+        {"table_npu_submit_count", iteration.stageStats.tableNpuSubmitCount},
+        {"table_dedup_skipped_count", iteration.stageStats.tableDedupSkippedCount},
+        {"ocr_timeout_count", iteration.stageStats.ocrTimeoutCount},
+        {"ocr_buffered_result_hit_count", iteration.stageStats.ocrBufferedResultHitCount},
         {"pipeline_call_ms", iteration.pipelineCallMs},
     };
 }
@@ -247,6 +273,16 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
         mean.cpuOnlyTimeMs += iteration.stageStats.cpuOnlyTimeMs;
         mean.npuLockWaitTimeMs += iteration.stageStats.npuLockWaitTimeMs;
         mean.npuLockHoldTimeMs += iteration.stageStats.npuLockHoldTimeMs;
+        mean.textBoxesRawCount += iteration.stageStats.textBoxesRawCount;
+        mean.textBoxesAfterDedupCount += iteration.stageStats.textBoxesAfterDedupCount;
+        mean.tableBoxesRawCount += iteration.stageStats.tableBoxesRawCount;
+        mean.tableBoxesAfterDedupCount += iteration.stageStats.tableBoxesAfterDedupCount;
+        mean.ocrSubmitCount += iteration.stageStats.ocrSubmitCount;
+        mean.ocrDedupSkippedCount += iteration.stageStats.ocrDedupSkippedCount;
+        mean.tableNpuSubmitCount += iteration.stageStats.tableNpuSubmitCount;
+        mean.tableDedupSkippedCount += iteration.stageStats.tableDedupSkippedCount;
+        mean.ocrTimeoutCount += iteration.stageStats.ocrTimeoutCount;
+        mean.ocrBufferedResultHitCount += iteration.stageStats.ocrBufferedResultHitCount;
     }
 
     const double denom = static_cast<double>(iterations.size());
@@ -263,6 +299,16 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
     mean.cpuOnlyTimeMs /= denom;
     mean.npuLockWaitTimeMs /= denom;
     mean.npuLockHoldTimeMs /= denom;
+    mean.textBoxesRawCount /= denom;
+    mean.textBoxesAfterDedupCount /= denom;
+    mean.tableBoxesRawCount /= denom;
+    mean.tableBoxesAfterDedupCount /= denom;
+    mean.ocrSubmitCount /= denom;
+    mean.ocrDedupSkippedCount /= denom;
+    mean.tableNpuSubmitCount /= denom;
+    mean.tableDedupSkippedCount /= denom;
+    mean.ocrTimeoutCount /= denom;
+    mean.ocrBufferedResultHitCount /= denom;
     return mean;
 }
 
@@ -494,6 +540,18 @@ std::string buildHumanSummary(const json& summary) {
         << ", figure=" << formatMs(stageBreakdown.value("figure_ms", 0.0))
         << ", formula=" << formatMs(stageBreakdown.value("formula_ms", 0.0))
         << ", unsupported=" << formatMs(stageBreakdown.value("unsupported_ms", 0.0))
+        << "\n";
+    out << "  mean_attribution_counts:\n";
+    out << "    text_boxes_raw=" << formatCount(stageBreakdown.value("text_boxes_raw_count", 0.0))
+        << ", text_boxes_after_dedup=" << formatCount(stageBreakdown.value("text_boxes_after_dedup_count", 0.0))
+        << ", table_boxes_raw=" << formatCount(stageBreakdown.value("table_boxes_raw_count", 0.0))
+        << ", table_boxes_after_dedup=" << formatCount(stageBreakdown.value("table_boxes_after_dedup_count", 0.0))
+        << ", ocr_submit=" << formatCount(stageBreakdown.value("ocr_submit_count", 0.0))
+        << ", ocr_dedup_skipped=" << formatCount(stageBreakdown.value("ocr_dedup_skipped_count", 0.0))
+        << ", table_npu_submit=" << formatCount(stageBreakdown.value("table_npu_submit_count", 0.0))
+        << ", table_dedup_skipped=" << formatCount(stageBreakdown.value("table_dedup_skipped_count", 0.0))
+        << ", ocr_timeout=" << formatCount(stageBreakdown.value("ocr_timeout_count", 0.0))
+        << ", ocr_buffered_result_hit=" << formatCount(stageBreakdown.value("ocr_buffered_result_hit_count", 0.0))
         << "\n";
     out << "  markdown_sha256: " << summary.value("markdown_sha256", "") << "\n";
     out << "  content_list_sha256: " << summary.value("content_list_sha256", "") << "\n";
