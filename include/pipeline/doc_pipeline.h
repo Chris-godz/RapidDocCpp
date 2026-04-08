@@ -40,6 +40,54 @@
 
 namespace rapid_doc {
 
+namespace detail {
+
+struct OcrWorkItem {
+    LayoutBox box;
+    ContentElement::Type type = ContentElement::Type::TEXT;
+    int pageIndex = 0;
+    float confidence = 0.0f;
+    cv::Mat crop;
+    bool skipped = false;
+    std::vector<size_t> originalIndices;
+};
+
+struct OcrFetchResult {
+    int64_t taskId = -1;
+    bool submitted = false;
+    bool fetched = false;
+    bool success = false;
+    bool bufferedHit = false;
+    double slotWaitMs = 0.0;
+    double outerSlotHoldMs = 0.0;
+    double submoduleWindowMs = 0.0;
+    double collectWaitMs = 0.0;
+    size_t bufferedOutOfOrderCount = 0;
+    std::optional<std::chrono::steady_clock::time_point> submitTime;
+    std::vector<ocr::PipelineOCRResult> results;
+};
+
+struct TableWorkItem {
+    LayoutBox box;
+    int pageIndex = 0;
+    cv::Mat crop;
+    bool invalidRoi = false;
+    std::vector<size_t> originalIndices;
+};
+
+struct TableNpuResult {
+    LayoutBox box;
+    int pageIndex = 0;
+    bool hasTableResult = false;
+    bool hasFallback = false;
+    std::string fallbackReason;
+    TableResult tableResult;
+    TableRecognizer::NpuStageResult npuStage;
+    std::vector<ocr::PipelineOCRResult> ocrBoxes;
+};
+
+} // namespace detail
+
 class DocPipelineTestAccess;
 class DocServer;
 
@@ -61,6 +109,9 @@ struct PipelineRunOverrides {
     std::optional<int> startPageId;
     std::optional<int> endPageId;
     std::optional<int> maxPages;
+    std::optional<PipelineMode> pipelineMode;
+    std::optional<OcrOuterMode> ocrOuterMode;
+    std::optional<size_t> ocrShadowWindow;
     std::optional<bool> enableFormula;
     std::optional<bool> enableWiredTable;
     std::optional<bool> enableMarkdownOutput;
@@ -155,11 +206,83 @@ private:
         RuntimeConfig runtime;
     };
 
+    struct PageContext {
+        std::chrono::steady_clock::time_point wallStartTime;
+        PageImage pageImage;
+        PageResult pageResult;
+        std::vector<LayoutBox> textBoxes;
+        std::vector<LayoutBox> tableBoxes;
+        std::vector<LayoutBox> figureBoxes;
+        std::vector<LayoutBox> equationBoxes;
+        std::vector<LayoutBox> unsupportedBoxes;
+
+        std::vector<detail::OcrWorkItem> ocrWorkItems;
+        std::vector<size_t> ocrWorkItemForOriginal;
+        std::vector<size_t> ocrCanonicalWorkItem;
+        std::vector<detail::OcrFetchResult> ocrFetchResults;
+        std::vector<ContentElement> textElements;
+
+        std::vector<detail::TableWorkItem> tableWorkItems;
+        std::vector<size_t> tableWorkItemForOriginal;
+        std::vector<size_t> tableCanonicalWorkItem;
+        std::vector<detail::TableNpuResult> tableNpuResults;
+        std::vector<ContentElement> tableElements;
+
+        double npuLockWaitTotalMs = 0.0;
+        double npuLockHoldTotalMs = 0.0;
+        double npuSerialTotalMs = 0.0;
+        double cpuOnlyTotalMs = 0.0;
+        double layoutNpuServiceTotalMs = 0.0;
+        double layoutNpuSlotWaitTotalMs = 0.0;
+        double ocrTableNpuServiceTotalMs = 0.0;
+        double ocrTableNpuSlotWaitTotalMs = 0.0;
+        double ocrOuterSlotHoldTotalMs = 0.0;
+        double ocrSubmoduleWindowTotalMs = 0.0;
+        double ocrSlotWaitTotalMs = 0.0;
+        double ocrCollectWaitTotalMs = 0.0;
+        size_t ocrInflightPeak = 0;
+        size_t ocrBufferedOutOfOrderCount = 0;
+        double tableNpuServiceTotalMs = 0.0;
+        double tableNpuSlotWaitTotalMs = 0.0;
+        double tableOcrServiceTotalMs = 0.0;
+        double tableOcrSlotWaitTotalMs = 0.0;
+        double ocrTableCpuPreTotalMs = 0.0;
+        double ocrTableCpuPostTotalMs = 0.0;
+        double finalizeCpuTotalMs = 0.0;
+        double tableFinalizeTotalMs = 0.0;
+        double ocrCollectOrMergeTotalMs = 0.0;
+        double ocrSubmitAreaSum = 0.0;
+        size_t textBoxesRawCount = 0;
+        size_t textBoxesAfterDedupCount = 0;
+        size_t tableBoxesRawCount = 0;
+        size_t tableBoxesAfterDedupCount = 0;
+        size_t ocrSubmitCount = 0;
+        size_t ocrSubmitSmallCount = 0;
+        size_t ocrSubmitMediumCount = 0;
+        size_t ocrSubmitLargeCount = 0;
+        size_t ocrSubmitTextCount = 0;
+        size_t ocrSubmitTitleCount = 0;
+        size_t ocrSubmitCodeCount = 0;
+        size_t ocrSubmitListCount = 0;
+        size_t ocrDedupSkippedCount = 0;
+        size_t tableNpuSubmitCount = 0;
+        size_t tableDedupSkippedCount = 0;
+        size_t ocrTimeoutCount = 0;
+        size_t ocrBufferedResultHitCount = 0;
+        std::vector<double> ocrSubmitAreas;
+    };
+
     /**
      * @brief Process a single page through the pipeline
      */
     PageResult processPage(const PageImage& pageImage);
     PageResult processPage(const PageImage& pageImage, const ExecutionContext& ctx);
+    void runLayoutStage(PageContext& pageCtx, const ExecutionContext& ctx);
+    void runPlanStage(PageContext& pageCtx, const ExecutionContext& ctx);
+    void runOcrTableStage(PageContext& pageCtx, const ExecutionContext& ctx);
+    void runFinalizeStage(PageContext& pageCtx, const ExecutionContext& ctx);
+    void runTableFinalizeCpuSubstage(PageContext& pageCtx, const ExecutionContext& ctx);
+    void runDocumentFinalizeSubstage(PageContext& pageCtx, const ExecutionContext& ctx);
 
     using OcrSubmitHook = std::function<bool(const cv::Mat&, int64_t)>;
     using OcrFetchHook = std::function<bool(
@@ -265,7 +388,8 @@ private:
         int64_t taskId,
         std::vector<ocr::PipelineOCRResult>& results,
         bool& success,
-        bool* bufferedHit = nullptr);
+        bool* bufferedHit = nullptr,
+        size_t* bufferedOutOfOrderCount = nullptr);
     int64_t allocateOcrTaskId();
 
     TableResult recognizeTable(const cv::Mat& tableCrop);
@@ -286,6 +410,14 @@ private:
     bool shouldUsePdfStreaming(const ExecutionContext& ctx) const;
     DocumentResult processRenderedPages(
         std::vector<PageImage> pageImages,
+        const ExecutionContext& ctx);
+    DocumentResult processPdfSerial(
+        PdfRenderer& renderer,
+        const std::function<bool(PdfRenderer&, const PdfRenderer::PageVisitor&)>& renderFn,
+        const ExecutionContext& ctx);
+    DocumentResult processPdfPagePipelineMvp(
+        PdfRenderer& renderer,
+        const std::function<bool(PdfRenderer&, const PdfRenderer::PageVisitor&)>& renderFn,
         const ExecutionContext& ctx);
     DocumentResult processPdfStreaming(
         PdfRenderer& renderer,

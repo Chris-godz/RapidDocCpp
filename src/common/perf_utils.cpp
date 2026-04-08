@@ -32,6 +32,34 @@ void accumulatePageStats(PageStageStats& target, const PageStageStats& source) {
     target.cpuOnlyTimeMs += source.cpuOnlyTimeMs;
     target.npuLockWaitTimeMs += source.npuLockWaitTimeMs;
     target.npuLockHoldTimeMs += source.npuLockHoldTimeMs;
+    target.npuServiceTimeMs += source.npuServiceTimeMs;
+    target.npuSlotWaitTimeMs += source.npuSlotWaitTimeMs;
+    target.layoutNpuServiceTimeMs += source.layoutNpuServiceTimeMs;
+    target.layoutNpuSlotWaitTimeMs += source.layoutNpuSlotWaitTimeMs;
+    target.ocrOuterSlotHoldTimeMs += source.ocrOuterSlotHoldTimeMs;
+    target.ocrSubmoduleWindowTimeMs += source.ocrSubmoduleWindowTimeMs;
+    target.ocrSlotWaitTimeMs += source.ocrSlotWaitTimeMs;
+    target.ocrCollectWaitTimeMs += source.ocrCollectWaitTimeMs;
+    target.ocrInflightPeak = std::max(target.ocrInflightPeak, source.ocrInflightPeak);
+    target.ocrBufferedOutOfOrderCount += source.ocrBufferedOutOfOrderCount;
+    target.tableNpuServiceTimeMs += source.tableNpuServiceTimeMs;
+    target.tableNpuSlotWaitTimeMs += source.tableNpuSlotWaitTimeMs;
+    target.tableOcrServiceTimeMs += source.tableOcrServiceTimeMs;
+    target.tableOcrSlotWaitTimeMs += source.tableOcrSlotWaitTimeMs;
+    target.cpuPreTimeMs += source.cpuPreTimeMs;
+    target.cpuPostTimeMs += source.cpuPostTimeMs;
+    target.finalizeCpuTimeMs += source.finalizeCpuTimeMs;
+    target.tableFinalizeTimeMs += source.tableFinalizeTimeMs;
+    target.ocrCollectOrMergeTimeMs += source.ocrCollectOrMergeTimeMs;
+    target.layoutQueueWaitTimeMs += source.layoutQueueWaitTimeMs;
+    target.planQueueWaitTimeMs += source.planQueueWaitTimeMs;
+    target.ocrTableQueueWaitTimeMs += source.ocrTableQueueWaitTimeMs;
+    target.finalizeQueueWaitTimeMs += source.finalizeQueueWaitTimeMs;
+    target.renderQueuePushBlockTimeMs += source.renderQueuePushBlockTimeMs;
+    target.layoutQueuePushBlockTimeMs += source.layoutQueuePushBlockTimeMs;
+    target.planQueuePushBlockTimeMs += source.planQueuePushBlockTimeMs;
+    target.ocrTableQueuePushBlockTimeMs += source.ocrTableQueuePushBlockTimeMs;
+    target.queueBackpressureTimeMs += source.queueBackpressureTimeMs;
     target.textBoxesRawCount += source.textBoxesRawCount;
     target.textBoxesAfterDedupCount += source.textBoxesAfterDedupCount;
     target.tableBoxesRawCount += source.tableBoxesRawCount;
@@ -50,6 +78,11 @@ void accumulatePageStats(PageStageStats& target, const PageStageStats& source) {
     target.tableDedupSkippedCount += source.tableDedupSkippedCount;
     target.ocrTimeoutCount += source.ocrTimeoutCount;
     target.ocrBufferedResultHitCount += source.ocrBufferedResultHitCount;
+    if (target.pipelineMode.empty()) {
+        target.pipelineMode = source.pipelineMode;
+    } else if (!source.pipelineMode.empty() && target.pipelineMode != source.pipelineMode) {
+        target.pipelineMode = "mixed";
+    }
 }
 
 } // namespace
@@ -89,6 +122,9 @@ DocumentStageStats accumulateDocumentStageStats(const std::vector<PageResult>& p
         stats.ocrSubmitAreaP50 = ocrSubmitAreaP50Weighted / stats.ocrSubmitCount;
         stats.ocrSubmitAreaP95 = ocrSubmitAreaP95Weighted / stats.ocrSubmitCount;
     }
+    if (stats.pipelineMode.empty()) {
+        stats.pipelineMode = "serial";
+    }
     return stats;
 }
 
@@ -106,6 +142,26 @@ double totalTrackedStageTimeMs(const DocumentStageStats& stats) {
     return stats.pdfRenderTimeMs +
            totalTrackedStageTimeMs(static_cast<const PageStageStats&>(stats)) +
            stats.outputGenTimeMs;
+}
+
+double computePipelineOverlapFactor(const PageStageStats& stats, double wallTimeMs) {
+    if (wallTimeMs <= 0.0) {
+        return 0.0;
+    }
+    return totalTrackedStageTimeMs(stats) / wallTimeMs;
+}
+
+double computePipelineOverlapFactor(const DocumentStageStats& stats, double wallTimeMs) {
+    if (wallTimeMs <= 0.0) {
+        return 0.0;
+    }
+    return (stats.layoutTimeMs +
+            stats.ocrTimeMs +
+            stats.tableTimeMs +
+            stats.figureTimeMs +
+            stats.formulaTimeMs +
+            stats.unsupportedTimeMs +
+            stats.readingOrderTimeMs) / wallTimeMs;
 }
 
 } // namespace rapid_doc

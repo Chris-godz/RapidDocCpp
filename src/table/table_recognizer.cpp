@@ -726,7 +726,7 @@ TableResult TableRecognizer::recognize(const cv::Mat& tableImage) {
     return finalizeRecognizePostprocess(tableImage, npuStage);
 }
 
-TableRecognizer::NpuStageResult TableRecognizer::recognizeNpuStage(const cv::Mat& tableImage) {
+TableRecognizer::NpuStageResult TableRecognizer::prepareNpuInput(const cv::Mat& tableImage) {
     NpuStageResult npuStage;
     auto tStart = std::chrono::steady_clock::now();
 
@@ -768,37 +768,72 @@ TableRecognizer::NpuStageResult TableRecognizer::recognizeNpuStage(const cv::Mat
     npuStage.padLeft = (targetSize - static_cast<int>(npuStage.origW * npuStage.scale)) / 2;
 
     auto preprocessStart = std::chrono::steady_clock::now();
-    cv::Mat preprocessed = preprocess(tableImage);
+    npuStage.preprocessedInput = preprocess(tableImage);
     auto preprocessEnd = std::chrono::steady_clock::now();
     npuStage.preprocessMs =
         std::chrono::duration<double, std::milli>(preprocessEnd - preprocessStart).count();
+    npuStage.supported = true;
+    auto tEnd = std::chrono::steady_clock::now();
+    npuStage.npuStageTimeMs =
+        std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+    return npuStage;
+}
 
+void TableRecognizer::runPreparedNpu(NpuStageResult& npuStage) {
+    if (!npuStage.supported || npuStage.preprocessedInput.empty()) {
+        return;
+    }
+
+    const int targetSize = config_.inputSize;
     auto dxRunStart = std::chrono::steady_clock::now();
-    auto dxOutputs = impl_->dxEngine->Run(static_cast<void*>(preprocessed.data));
+    auto dxOutputs = impl_->dxEngine->Run(static_cast<void*>(npuStage.preprocessedInput.data));
     auto dxRunEnd = std::chrono::steady_clock::now();
     npuStage.dxRunMs =
         std::chrono::duration<double, std::milli>(dxRunEnd - dxRunStart).count();
 
     auto& outTensor = dxOutputs[0];
-    int maskH = targetSize;
-    int maskW = targetSize;
+    npuStage.maskH = targetSize;
+    npuStage.maskW = targetSize;
     auto& outShape = outTensor->shape();
     if (outShape.size() >= 2) {
-        maskH = static_cast<int>(outShape[outShape.size() - 2]);
-        maskW = static_cast<int>(outShape[outShape.size() - 1]);
+        npuStage.maskH = static_cast<int>(outShape[outShape.size() - 2]);
+        npuStage.maskW = static_cast<int>(outShape[outShape.size() - 1]);
+    }
+
+    const int64_t* rawPtr = reinterpret_cast<const int64_t*>(outTensor->data());
+    npuStage.rawMaskData.assign(
+        rawPtr,
+        rawPtr + static_cast<size_t>(npuStage.maskH) * static_cast<size_t>(npuStage.maskW));
+}
+
+void TableRecognizer::decodePreparedMask(NpuStageResult& npuStage) {
+    if (!npuStage.supported || npuStage.rawMaskData.empty() ||
+        npuStage.maskH <= 0 || npuStage.maskW <= 0) {
+        return;
     }
 
     auto maskDecodeStart = std::chrono::steady_clock::now();
-    const int64_t* rawPtr = reinterpret_cast<const int64_t*>(outTensor->data());
-    npuStage.mask = cv::Mat(maskH, maskW, CV_8UC1);
-    for (int i = 0; i < maskH * maskW; ++i) {
-        npuStage.mask.data[i] = static_cast<uint8_t>(rawPtr[i]);
+    npuStage.mask = cv::Mat(npuStage.maskH, npuStage.maskW, CV_8UC1);
+    for (int i = 0; i < npuStage.maskH * npuStage.maskW; ++i) {
+        npuStage.mask.data[i] = static_cast<uint8_t>(npuStage.rawMaskData[static_cast<size_t>(i)]);
     }
     auto maskDecodeEnd = std::chrono::steady_clock::now();
     npuStage.maskDecodeMs =
         std::chrono::duration<double, std::milli>(maskDecodeEnd - maskDecodeStart).count();
+    npuStage.preprocessedInput.release();
+    npuStage.rawMaskData.clear();
+    npuStage.rawMaskData.shrink_to_fit();
+}
 
-    npuStage.supported = true;
+TableRecognizer::NpuStageResult TableRecognizer::recognizeNpuStage(const cv::Mat& tableImage) {
+    auto tStart = std::chrono::steady_clock::now();
+    NpuStageResult npuStage = prepareNpuInput(tableImage);
+    if (!npuStage.supported) {
+        return npuStage;
+    }
+
+    runPreparedNpu(npuStage);
+    decodePreparedMask(npuStage);
     auto tEnd = std::chrono::steady_clock::now();
     npuStage.npuStageTimeMs =
         std::chrono::duration<double, std::milli>(tEnd - tStart).count();

@@ -69,6 +69,34 @@ public:
         return pipeline.runTableRecognition(image, tableBoxes, pageIndex);
     }
 
+    static PageResult processPageWithLayoutBoxes(
+        DocPipeline& pipeline,
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& layoutBoxes,
+        int pageIndex)
+    {
+        pipeline.resetOcrTransientStateForRun();
+        auto ctx = pipeline.makeExecutionContext(nullptr);
+
+        DocPipeline::PageContext pageCtx;
+        pageCtx.wallStartTime = std::chrono::steady_clock::now();
+        pageCtx.pageImage.image = image;
+        pageCtx.pageImage.pageIndex = pageIndex;
+        pageCtx.pageImage.dpi = pipeline.config_.runtime.pdfDpi;
+        pageCtx.pageImage.scaleFactor = 1.0;
+        pageCtx.pageImage.pdfWidth = image.cols;
+        pageCtx.pageImage.pdfHeight = image.rows;
+        pageCtx.pageResult.pageIndex = pageIndex;
+        pageCtx.pageResult.pageWidth = image.cols;
+        pageCtx.pageResult.pageHeight = image.rows;
+        pageCtx.pageResult.layoutResult.boxes = layoutBoxes;
+
+        pipeline.runPlanStage(pageCtx, ctx);
+        pipeline.runOcrTableStage(pageCtx, ctx);
+        pipeline.runFinalizeStage(pageCtx, ctx);
+        return pageCtx.pageResult;
+    }
+
     static std::vector<ContentElement> handleUnsupportedElements(
         DocPipeline& pipeline,
         const std::vector<LayoutBox>& unsupportedBoxes,

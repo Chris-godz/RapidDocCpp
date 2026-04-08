@@ -20,6 +20,8 @@
 #include "common/config.h"
 #include "common/logger.h"
 #include "output/detail_report.h"
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <fstream>
@@ -39,6 +41,9 @@ void printUsage(const char* programName) {
     std::cout << "      --no-table          Disable table recognition\n";
     std::cout << "      --no-ocr            Disable OCR\n";
     std::cout << "      --json-only         Output JSON only (no Markdown)\n";
+    std::cout << "      --pipeline-mode <m> serial|page_pipeline_mvp\n";
+    std::cout << "      --ocr-outer-mode <m> immediate_per_task|shadow_windowed_collect\n";
+    std::cout << "      --ocr-shadow-window <n> Max OCR inflight window for shadow mode (default: 8)\n";
     std::cout << "      --detail            Print and save a human-readable detail report\n";
     std::cout << "      --detail-file <p>   Override detail report output path\n";
     std::cout << "  -v, --verbose           Verbose logging\n";
@@ -59,12 +64,18 @@ struct CliArgs {
     bool detail = false;
     std::string detailPath;
     bool verbose = false;
+    rapid_doc::PipelineMode pipelineMode = rapid_doc::PipelineMode::Serial;
+    rapid_doc::OcrOuterMode ocrOuterMode = rapid_doc::OcrOuterMode::ImmediatePerTask;
+    size_t ocrShadowWindow = 8;
 };
 
 enum LongOnlyOpt {
     OPT_NO_TABLE = 256,
     OPT_NO_OCR,
     OPT_JSON_ONLY,
+    OPT_PIPELINE_MODE,
+    OPT_OCR_OUTER_MODE,
+    OPT_OCR_SHADOW_WINDOW,
     OPT_DETAIL,
     OPT_DETAIL_FILE,
 };
@@ -78,6 +89,9 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
         {"no-table",  no_argument,       nullptr, OPT_NO_TABLE},
         {"no-ocr",    no_argument,       nullptr, OPT_NO_OCR},
         {"json-only", no_argument,       nullptr, OPT_JSON_ONLY},
+        {"pipeline-mode", required_argument, nullptr, OPT_PIPELINE_MODE},
+        {"ocr-outer-mode", required_argument, nullptr, OPT_OCR_OUTER_MODE},
+        {"ocr-shadow-window", required_argument, nullptr, OPT_OCR_SHADOW_WINDOW},
         {"detail",    no_argument,       nullptr, OPT_DETAIL},
         {"detail-file", required_argument, nullptr, OPT_DETAIL_FILE},
         {"verbose",   no_argument,       nullptr, 'v'},
@@ -95,6 +109,24 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
             case OPT_NO_TABLE: args.enableTable = false; break;
             case OPT_NO_OCR:   args.enableOcr = false; break;
             case OPT_JSON_ONLY: args.jsonOnly = true; break;
+            case OPT_PIPELINE_MODE:
+                if (!rapid_doc::parsePipelineMode(optarg, args.pipelineMode)) {
+                    std::cerr << "Error: invalid --pipeline-mode value: " << optarg << "\n";
+                    return false;
+                }
+                break;
+            case OPT_OCR_OUTER_MODE:
+                if (!rapid_doc::parseOcrOuterMode(optarg, args.ocrOuterMode)) {
+                    std::cerr << "Error: invalid --ocr-outer-mode value: " << optarg << "\n";
+                    return false;
+                }
+                break;
+            case OPT_OCR_SHADOW_WINDOW:
+                {
+                    const long long parsed = std::strtoll(optarg, nullptr, 10);
+                    args.ocrShadowWindow = parsed > 0 ? static_cast<size_t>(parsed) : 1;
+                }
+                break;
             case OPT_DETAIL: args.detail = true; break;
             case OPT_DETAIL_FILE: args.detailPath = optarg; break;
             case 'v': args.verbose = true; break;
@@ -140,6 +172,9 @@ int main(int argc, char* argv[]) {
     config.stages.enableOcr = args.enableOcr;
     config.stages.enableMarkdownOutput = !args.jsonOnly;
     config.runtime.saveVisualization = args.detail;
+    config.runtime.pipelineMode = args.pipelineMode;
+    config.runtime.ocrOuterMode = args.ocrOuterMode;
+    config.runtime.ocrShadowWindow = args.ocrShadowWindow;
 
     // Create and initialize pipeline
     rapid_doc::DocPipeline pipeline(config);

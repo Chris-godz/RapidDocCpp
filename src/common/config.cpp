@@ -1,10 +1,66 @@
 #include "common/config.h"
 #include "common/logger.h"
 #include <filesystem>
+#include <algorithm>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
 namespace rapid_doc {
+
+const char* pipelineModeToString(PipelineMode mode) {
+    switch (mode) {
+        case PipelineMode::Serial:
+            return "serial";
+        case PipelineMode::PagePipelineMvp:
+            return "page_pipeline_mvp";
+        default:
+            return "serial";
+    }
+}
+
+bool parsePipelineMode(const std::string& raw, PipelineMode& mode) {
+    std::string value = raw;
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (value == "serial") {
+        mode = PipelineMode::Serial;
+        return true;
+    }
+    if (value == "page_pipeline_mvp") {
+        mode = PipelineMode::PagePipelineMvp;
+        return true;
+    }
+    return false;
+}
+
+const char* ocrOuterModeToString(OcrOuterMode mode) {
+    switch (mode) {
+        case OcrOuterMode::ImmediatePerTask:
+            return "immediate_per_task";
+        case OcrOuterMode::ShadowWindowedCollect:
+            return "shadow_windowed_collect";
+        default:
+            return "immediate_per_task";
+    }
+}
+
+bool parseOcrOuterMode(const std::string& raw, OcrOuterMode& mode) {
+    std::string value = raw;
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (value == "immediate_per_task") {
+        mode = OcrOuterMode::ImmediatePerTask;
+        return true;
+    }
+    if (value == "shadow_windowed_collect") {
+        mode = OcrOuterMode::ShadowWindowedCollect;
+        return true;
+    }
+    return false;
+}
 
 PipelineConfig PipelineConfig::Default(const std::string& projectRoot) {
     PipelineConfig cfg;
@@ -27,6 +83,16 @@ PipelineConfig PipelineConfig::Default(const std::string& projectRoot) {
 }
 
 std::string PipelineConfig::validate() const {
+    if (runtime.stageQueueRendered == 0 ||
+        runtime.stageQueuePlanned == 0 ||
+        runtime.stageQueueOcrTable == 0 ||
+        runtime.stageQueueFinalize == 0) {
+        return "Pipeline stage queue capacities must be positive";
+    }
+    if (runtime.ocrShadowWindow == 0) {
+        return "OCR shadow window must be positive";
+    }
+
     // Layout model check
     if (stages.enableLayout) {
         if (!fs::exists(models.layoutDxnnModel))
@@ -77,6 +143,13 @@ void PipelineConfig::show() const {
     LOG_INFO("  Start page:       {}", runtime.startPageId);
     LOG_INFO("  End page:         {}", runtime.endPageId);
     LOG_INFO("  Device ID:        {}", runtime.deviceId);
+    LOG_INFO("  Pipeline mode:    {}", pipelineModeToString(runtime.pipelineMode));
+    LOG_INFO("  OCR outer mode:   {}", ocrOuterModeToString(runtime.ocrOuterMode));
+    LOG_INFO("  OCR shadow win:   {}", runtime.ocrShadowWindow);
+    LOG_INFO("  Queue rendered:   {}", runtime.stageQueueRendered);
+    LOG_INFO("  Queue planned:    {}", runtime.stageQueuePlanned);
+    LOG_INFO("  Queue ocr/table:  {}", runtime.stageQueueOcrTable);
+    LOG_INFO("  Queue finalize:   {}", runtime.stageQueueFinalize);
     LOG_INFO("  Output dir:       {}", runtime.outputDir);
     LOG_INFO("========================================");
 }

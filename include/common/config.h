@@ -8,8 +8,25 @@
  */
 
 #include <string>
+#include <cstddef>
 
 namespace rapid_doc {
+
+enum class PipelineMode {
+    Serial,
+    PagePipelineMvp,
+};
+
+const char* pipelineModeToString(PipelineMode mode);
+bool parsePipelineMode(const std::string& raw, PipelineMode& mode);
+
+enum class OcrOuterMode {
+    ImmediatePerTask,
+    ShadowWindowedCollect,
+};
+
+const char* ocrOuterModeToString(OcrOuterMode mode);
+bool parseOcrOuterMode(const std::string& raw, OcrOuterMode& mode);
 
 /**
  * @brief Model paths configuration
@@ -59,6 +76,13 @@ struct RuntimeConfig {
     int endPageId = -1;                 // Inclusive end page (-1 = all)
     int maxConcurrentPages = 4;         // Parallel PDF rendering limit
     int deviceId = -1;                  // DXRT device affinity (-1 = runtime default)
+    PipelineMode pipelineMode = PipelineMode::Serial;
+    OcrOuterMode ocrOuterMode = OcrOuterMode::ImmediatePerTask;
+    size_t ocrShadowWindow = 8;
+    size_t stageQueueRendered = 2;
+    size_t stageQueuePlanned = 2;
+    size_t stageQueueOcrTable = 4;
+    size_t stageQueueFinalize = 4;
     
     // Layout detection
     float layoutConfThreshold = 0.5f;   // Layout detection confidence threshold

@@ -118,6 +118,9 @@ std::string buildDetailReport(
     out << "  pages: " << result.processedPages << "/" << result.totalPages << "\n";
     out << "  skipped_elements: " << result.skippedElements << "\n";
     out << "  total_time: " << formatMs(result.totalTimeMs) << "\n";
+    out << "  pipeline_mode: " << result.stats.pipelineMode << "\n";
+    out << "  overlap_factor: " << std::fixed << std::setprecision(2)
+        << result.stats.pipelineOverlapFactor << "\n";
     out << "  tracked_stage_time: " << formatMs(totalTrackedStageTimeMs(result.stats)) << "\n";
     appendStageLine(out, "pdf_render", result.stats.pdfRenderTimeMs);
     appendStageLine(out, "layout", result.stats.layoutTimeMs);
@@ -132,6 +135,34 @@ std::string buildDetailReport(
     appendStageLine(out, "cpu_only", result.stats.cpuOnlyTimeMs);
     appendStageLine(out, "npu_lock_wait", result.stats.npuLockWaitTimeMs);
     appendStageLine(out, "npu_lock_hold", result.stats.npuLockHoldTimeMs);
+    appendStageLine(out, "npu_service", result.stats.npuServiceTimeMs);
+    appendStageLine(out, "npu_slot_wait", result.stats.npuSlotWaitTimeMs);
+    appendStageLine(out, "layout_npu_service", result.stats.layoutNpuServiceTimeMs);
+    appendStageLine(out, "layout_npu_slot_wait", result.stats.layoutNpuSlotWaitTimeMs);
+    appendStageLine(out, "ocr_outer_slot_hold", result.stats.ocrOuterSlotHoldTimeMs);
+    appendStageLine(out, "ocr_submodule_window", result.stats.ocrSubmoduleWindowTimeMs);
+    appendStageLine(out, "ocr_slot_wait", result.stats.ocrSlotWaitTimeMs);
+    appendStageLine(out, "ocr_collect_wait", result.stats.ocrCollectWaitTimeMs);
+    appendStageLine(out, "ocr_inflight_peak", result.stats.ocrInflightPeak);
+    appendStageLine(out, "ocr_buffered_out_of_order", result.stats.ocrBufferedOutOfOrderCount);
+    appendStageLine(out, "table_npu_service", result.stats.tableNpuServiceTimeMs);
+    appendStageLine(out, "table_npu_slot_wait", result.stats.tableNpuSlotWaitTimeMs);
+    appendStageLine(out, "table_ocr_service", result.stats.tableOcrServiceTimeMs);
+    appendStageLine(out, "table_ocr_slot_wait", result.stats.tableOcrSlotWaitTimeMs);
+    appendStageLine(out, "cpu_pre", result.stats.cpuPreTimeMs);
+    appendStageLine(out, "cpu_post", result.stats.cpuPostTimeMs);
+    appendStageLine(out, "finalize_cpu", result.stats.finalizeCpuTimeMs);
+    appendStageLine(out, "table_finalize", result.stats.tableFinalizeTimeMs);
+    appendStageLine(out, "ocr_collect_or_merge", result.stats.ocrCollectOrMergeTimeMs);
+    appendStageLine(out, "layout_queue_wait", result.stats.layoutQueueWaitTimeMs);
+    appendStageLine(out, "plan_queue_wait", result.stats.planQueueWaitTimeMs);
+    appendStageLine(out, "ocr_table_queue_wait", result.stats.ocrTableQueueWaitTimeMs);
+    appendStageLine(out, "finalize_queue_wait", result.stats.finalizeQueueWaitTimeMs);
+    appendStageLine(out, "render_queue_push_block", result.stats.renderQueuePushBlockTimeMs);
+    appendStageLine(out, "layout_queue_push_block", result.stats.layoutQueuePushBlockTimeMs);
+    appendStageLine(out, "plan_queue_push_block", result.stats.planQueuePushBlockTimeMs);
+    appendStageLine(out, "ocr_table_queue_push_block", result.stats.ocrTableQueuePushBlockTimeMs);
+    appendStageLine(out, "queue_backpressure", result.stats.queueBackpressureTimeMs);
 
     out << "Per-page\n";
     for (const auto& page : result.pages) {
@@ -154,6 +185,7 @@ std::string buildDetailReport(
             << " | size=" << page.pageWidth << "x" << page.pageHeight
             << " | total=" << formatMs(page.totalTimeMs)
             << " | tracked=" << formatMs(totalTrackedStageTimeMs(page.stats))
+            << " | overlap=" << std::fixed << std::setprecision(2) << page.stats.pipelineOverlapFactor
             << " | elements=" << page.elements.size()
             << " | skipped=" << skippedCount
             << " | fallback=" << fallbackCount
@@ -170,6 +202,34 @@ std::string buildDetailReport(
         appendStageLine(out, "    cpu_only", page.stats.cpuOnlyTimeMs);
         appendStageLine(out, "    npu_lock_wait", page.stats.npuLockWaitTimeMs);
         appendStageLine(out, "    npu_lock_hold", page.stats.npuLockHoldTimeMs);
+        appendStageLine(out, "    npu_service", page.stats.npuServiceTimeMs);
+        appendStageLine(out, "    npu_slot_wait", page.stats.npuSlotWaitTimeMs);
+        appendStageLine(out, "    layout_npu_service", page.stats.layoutNpuServiceTimeMs);
+        appendStageLine(out, "    layout_npu_slot_wait", page.stats.layoutNpuSlotWaitTimeMs);
+        appendStageLine(out, "    ocr_outer_slot_hold", page.stats.ocrOuterSlotHoldTimeMs);
+        appendStageLine(out, "    ocr_submodule_window", page.stats.ocrSubmoduleWindowTimeMs);
+        appendStageLine(out, "    ocr_slot_wait", page.stats.ocrSlotWaitTimeMs);
+        appendStageLine(out, "    ocr_collect_wait", page.stats.ocrCollectWaitTimeMs);
+        appendStageLine(out, "    ocr_inflight_peak", page.stats.ocrInflightPeak);
+        appendStageLine(out, "    ocr_buffered_out_of_order", page.stats.ocrBufferedOutOfOrderCount);
+        appendStageLine(out, "    table_npu_service", page.stats.tableNpuServiceTimeMs);
+        appendStageLine(out, "    table_npu_slot_wait", page.stats.tableNpuSlotWaitTimeMs);
+        appendStageLine(out, "    table_ocr_service", page.stats.tableOcrServiceTimeMs);
+        appendStageLine(out, "    table_ocr_slot_wait", page.stats.tableOcrSlotWaitTimeMs);
+        appendStageLine(out, "    cpu_pre", page.stats.cpuPreTimeMs);
+        appendStageLine(out, "    cpu_post", page.stats.cpuPostTimeMs);
+        appendStageLine(out, "    finalize_cpu", page.stats.finalizeCpuTimeMs);
+        appendStageLine(out, "    table_finalize", page.stats.tableFinalizeTimeMs);
+        appendStageLine(out, "    ocr_collect_or_merge", page.stats.ocrCollectOrMergeTimeMs);
+        appendStageLine(out, "    layout_queue_wait", page.stats.layoutQueueWaitTimeMs);
+        appendStageLine(out, "    plan_queue_wait", page.stats.planQueueWaitTimeMs);
+        appendStageLine(out, "    ocr_table_queue_wait", page.stats.ocrTableQueueWaitTimeMs);
+        appendStageLine(out, "    finalize_queue_wait", page.stats.finalizeQueueWaitTimeMs);
+        appendStageLine(out, "    render_queue_push_block", page.stats.renderQueuePushBlockTimeMs);
+        appendStageLine(out, "    layout_queue_push_block", page.stats.layoutQueuePushBlockTimeMs);
+        appendStageLine(out, "    plan_queue_push_block", page.stats.planQueuePushBlockTimeMs);
+        appendStageLine(out, "    ocr_table_queue_push_block", page.stats.ocrTableQueuePushBlockTimeMs);
+        appendStageLine(out, "    queue_backpressure", page.stats.queueBackpressureTimeMs);
 
         bool wroteFlaggedElement = false;
         for (const auto& elem : page.elements) {

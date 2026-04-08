@@ -443,11 +443,15 @@ json makeStatsJson(
     std::optional<double> routeQueueMs = std::nullopt,
     std::optional<double> lbProxyMs = std::nullopt)
 {
+    const double pagesPerSec = result.totalTimeMs > 0.0
+        ? (static_cast<double>(result.processedPages) * 1000.0 / result.totalTimeMs)
+        : 0.0;
     json stats{
         {"pages", result.processedPages},
         {"total_pages", result.totalPages},
         {"skipped", result.skippedElements},
         {"time_ms", result.totalTimeMs},
+        {"pages_per_sec", pagesPerSec},
         {"pdf_render_ms", result.stats.pdfRenderTimeMs},
         {"layout_ms", result.stats.layoutTimeMs},
         {"ocr_ms", result.stats.ocrTimeMs},
@@ -457,6 +461,36 @@ json makeStatsJson(
         {"cpu_only_ms", result.stats.cpuOnlyTimeMs},
         {"npu_lock_wait_ms", result.stats.npuLockWaitTimeMs},
         {"npu_lock_hold_ms", result.stats.npuLockHoldTimeMs},
+        {"npu_service_ms", result.stats.npuServiceTimeMs},
+        {"npu_slot_wait_ms", result.stats.npuSlotWaitTimeMs},
+        {"layout_npu_service_ms", result.stats.layoutNpuServiceTimeMs},
+        {"layout_npu_slot_wait_ms", result.stats.layoutNpuSlotWaitTimeMs},
+        {"ocr_outer_slot_hold_ms", result.stats.ocrOuterSlotHoldTimeMs},
+        {"ocr_submodule_window_ms", result.stats.ocrSubmoduleWindowTimeMs},
+        {"ocr_slot_wait_ms", result.stats.ocrSlotWaitTimeMs},
+        {"ocr_collect_wait_ms", result.stats.ocrCollectWaitTimeMs},
+        {"ocr_inflight_peak", result.stats.ocrInflightPeak},
+        {"ocr_buffered_out_of_order_count", result.stats.ocrBufferedOutOfOrderCount},
+        {"table_npu_service_ms", result.stats.tableNpuServiceTimeMs},
+        {"table_npu_slot_wait_ms", result.stats.tableNpuSlotWaitTimeMs},
+        {"table_ocr_service_ms", result.stats.tableOcrServiceTimeMs},
+        {"table_ocr_slot_wait_ms", result.stats.tableOcrSlotWaitTimeMs},
+        {"cpu_pre_ms", result.stats.cpuPreTimeMs},
+        {"cpu_post_ms", result.stats.cpuPostTimeMs},
+        {"finalize_cpu_ms", result.stats.finalizeCpuTimeMs},
+        {"table_finalize_ms", result.stats.tableFinalizeTimeMs},
+        {"ocr_collect_or_merge_ms", result.stats.ocrCollectOrMergeTimeMs},
+        {"layout_queue_wait_ms", result.stats.layoutQueueWaitTimeMs},
+        {"plan_queue_wait_ms", result.stats.planQueueWaitTimeMs},
+        {"ocr_table_queue_wait_ms", result.stats.ocrTableQueueWaitTimeMs},
+        {"finalize_queue_wait_ms", result.stats.finalizeQueueWaitTimeMs},
+        {"render_queue_push_block_ms", result.stats.renderQueuePushBlockTimeMs},
+        {"layout_queue_push_block_ms", result.stats.layoutQueuePushBlockTimeMs},
+        {"plan_queue_push_block_ms", result.stats.planQueuePushBlockTimeMs},
+        {"ocr_table_queue_push_block_ms", result.stats.ocrTableQueuePushBlockTimeMs},
+        {"queue_backpressure_ms", result.stats.queueBackpressureTimeMs},
+        {"pipeline_overlap_factor", result.stats.pipelineOverlapFactor},
+        {"pipeline_mode", result.stats.pipelineMode},
         {"output_gen_ms", result.stats.outputGenTimeMs},
         {"text_boxes_raw_count", result.stats.textBoxesRawCount},
         {"text_boxes_after_dedup_count", result.stats.textBoxesAfterDedupCount},
@@ -653,6 +687,9 @@ struct FileParseOptions {
     std::string ocrEngine = "dxengine";
     std::string formulaEngine = "image_fallback";
     std::string tableEngine = "dxengine";
+    std::string pipelineMode;
+    std::string ocrOuterMode;
+    size_t ocrShadowWindow = 0;
 };
 
 std::vector<std::string> collectRequestWarnings(const FileParseOptions& options) {
@@ -677,6 +714,15 @@ std::vector<std::string> collectRequestWarnings(const FileParseOptions& options)
     if (options.parseMethod == "txt") {
         warnings.push_back("parse_method=txt is not natively supported in C++; falling back to auto pipeline.");
     }
+    PipelineMode ignoredMode = PipelineMode::Serial;
+    if (!options.pipelineMode.empty() && !parsePipelineMode(options.pipelineMode, ignoredMode)) {
+        warnings.push_back("pipeline_mode request ignored; falling back to configured pipeline mode.");
+    }
+    OcrOuterMode ignoredOcrOuterMode = OcrOuterMode::ImmediatePerTask;
+    if (!options.ocrOuterMode.empty() &&
+        !parseOcrOuterMode(options.ocrOuterMode, ignoredOcrOuterMode)) {
+        warnings.push_back("ocr_outer_mode request ignored; falling back to configured OCR outer mode.");
+    }
     return warnings;
 }
 
@@ -691,9 +737,20 @@ PipelineRunOverrides makeRunOverrides(
     overrides.saveVisualization = true;
     overrides.startPageId = options.startPageId;
     overrides.endPageId = options.endPageId;
+    PipelineMode mode = pipeline.config().runtime.pipelineMode;
     overrides.enableFormula = options.formulaEnable;
     overrides.enableWiredTable = options.tableEnable;
     overrides.enableMarkdownOutput = pipeline.config().stages.enableMarkdownOutput;
+    if (parsePipelineMode(options.pipelineMode, mode)) {
+        overrides.pipelineMode = mode;
+    }
+    OcrOuterMode ocrOuterMode = pipeline.config().runtime.ocrOuterMode;
+    if (parseOcrOuterMode(options.ocrOuterMode, ocrOuterMode)) {
+        overrides.ocrOuterMode = ocrOuterMode;
+    }
+    if (options.ocrShadowWindow > 0) {
+        overrides.ocrShadowWindow = options.ocrShadowWindow;
+    }
     return overrides;
 }
 
@@ -925,6 +982,15 @@ FileParseOptions parseFileParseOptions(const crow::multipart::message& msg) {
     options.returnImages = parseBool(getMultipartField(msg, "return_images"), false);
     options.startPageId = parseInt(getMultipartField(msg, "start_page_id"), 0);
     options.endPageId = parseInt(getMultipartField(msg, "end_page_id"), 99999);
+    options.pipelineMode = toLower(getMultipartField(msg, "pipeline_mode", options.pipelineMode));
+    options.ocrOuterMode =
+        toLower(getMultipartField(msg, "ocr_outer_mode", options.ocrOuterMode));
+    const std::string rawShadowWindow = getMultipartField(msg, "ocr_shadow_window");
+    if (!rawShadowWindow.empty()) {
+        const int parsedShadowWindow = parseInt(rawShadowWindow, 0);
+        options.ocrShadowWindow =
+            parsedShadowWindow > 0 ? static_cast<size_t>(parsedShadowWindow) : 1;
+    }
     return options;
 }
 
@@ -1146,6 +1212,14 @@ void DocServer::run() {
             options.returnMd = true;
             options.returnContentList = true;
             options.clearOutputFile = true;
+            options.pipelineMode = toLower(getMultipartField(msg, "pipeline_mode"));
+            options.ocrOuterMode = toLower(getMultipartField(msg, "ocr_outer_mode"));
+            const std::string rawShadowWindow = getMultipartField(msg, "ocr_shadow_window");
+            if (!rawShadowWindow.empty()) {
+                const int parsedShadowWindow = parseInt(rawShadowWindow, 0);
+                options.ocrShadowWindow =
+                    parsedShadowWindow > 0 ? static_cast<size_t>(parsedShadowWindow) : 1;
+            }
 
             const RoutedProcessedDocument routed = executeDocument(filePart.body, filename, options);
             const auto& processed = routed.processed;
@@ -1204,6 +1278,13 @@ void DocServer::run() {
             options.returnMd = true;
             options.returnContentList = true;
             options.clearOutputFile = true;
+            options.pipelineMode = toLower(requestBody.value("pipeline_mode", std::string()));
+            options.ocrOuterMode = toLower(requestBody.value("ocr_outer_mode", std::string()));
+            if (requestBody.contains("ocr_shadow_window")) {
+                const int parsedShadowWindow = requestBody.value("ocr_shadow_window", 0);
+                options.ocrShadowWindow =
+                    parsedShadowWindow > 0 ? static_cast<size_t>(parsedShadowWindow) : 1;
+            }
 
             const RoutedProcessedDocument routed = executeDocument(
                 std::string(reinterpret_cast<const char*>(decoded.data()), decoded.size()),
@@ -1658,6 +1739,26 @@ std::string DocServer::buildStatusJson() {
         ? 0.0
         : static_cast<double>(ocrSubmitAreaP95WeightedTotal_.load(std::memory_order_relaxed)) /
             static_cast<double>(ocrSubmitCountTotal);
+    const double overlapFactorMean = samples == 0
+        ? 0.0
+        : static_cast<double>(
+              pipelineOverlapFactorMilliTotal_.load(std::memory_order_relaxed)) /
+            static_cast<double>(samples) / 1000.0;
+    const double ocrInflightPeakMean = samples == 0
+        ? 0.0
+        : static_cast<double>(ocrInflightPeakTotal_.load(std::memory_order_relaxed)) /
+            static_cast<double>(samples);
+    const uint64_t serialModeCount = serialModeCount_.load(std::memory_order_relaxed);
+    const uint64_t pagePipelineModeCount =
+        pagePipelineModeCount_.load(std::memory_order_relaxed);
+    std::string pipelineMode = pipelineModeToString(config_.pipelineConfig.runtime.pipelineMode);
+    if (serialModeCount > 0 && pagePipelineModeCount > 0) {
+        pipelineMode = "mixed";
+    } else if (pagePipelineModeCount > 0) {
+        pipelineMode = "page_pipeline_mvp";
+    } else if (serialModeCount > 0) {
+        pipelineMode = "serial";
+    }
 
     json status{
         {"status", running_.load() ? "running" : "stopped"},
@@ -1670,6 +1771,8 @@ std::string DocServer::buildStatusJson() {
             {"routing_policy", config_.routingPolicy},
             {"worker_count", config_.numWorkers},
             {"shard_count", shards_.size()},
+            {"ocr_outer_mode", ocrOuterModeToString(config_.pipelineConfig.runtime.ocrOuterMode)},
+            {"ocr_shadow_window", config_.pipelineConfig.runtime.ocrShadowWindow},
             {"configured_device_ids", configuredDeviceIds},
             {"memory_telemetry_status", memoryTelemetryStatus},
         }},
@@ -1695,6 +1798,36 @@ std::string DocServer::buildStatusJson() {
             {"cpu_only_ms", static_cast<double>(cpuStageUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
             {"npu_lock_wait_ms", static_cast<double>(lockWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
             {"npu_lock_hold_ms", static_cast<double>(lockHoldUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"npu_service_ms", static_cast<double>(npuServiceUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"npu_slot_wait_ms", static_cast<double>(npuSlotWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"layout_npu_service_ms", static_cast<double>(layoutNpuServiceUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"layout_npu_slot_wait_ms", static_cast<double>(layoutNpuSlotWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_outer_slot_hold_ms", static_cast<double>(ocrOuterSlotHoldUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_submodule_window_ms", static_cast<double>(ocrSubmoduleWindowUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_slot_wait_ms", static_cast<double>(ocrSlotWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_collect_wait_ms", static_cast<double>(ocrCollectWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_inflight_peak", ocrInflightPeakMean},
+            {"ocr_buffered_out_of_order_count", ocrBufferedOutOfOrderCountTotal_.load(std::memory_order_relaxed)},
+            {"table_npu_service_ms", static_cast<double>(tableNpuServiceUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"table_npu_slot_wait_ms", static_cast<double>(tableNpuSlotWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"table_ocr_service_ms", static_cast<double>(tableOcrServiceUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"table_ocr_slot_wait_ms", static_cast<double>(tableOcrSlotWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"cpu_pre_ms", static_cast<double>(cpuPreUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"cpu_post_ms", static_cast<double>(cpuPostUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"finalize_cpu_ms", static_cast<double>(finalizeCpuUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"table_finalize_ms", static_cast<double>(tableFinalizeUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_collect_or_merge_ms", static_cast<double>(ocrCollectOrMergeUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"layout_queue_wait_ms", static_cast<double>(layoutQueueWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"plan_queue_wait_ms", static_cast<double>(planQueueWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_table_queue_wait_ms", static_cast<double>(ocrTableQueueWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"finalize_queue_wait_ms", static_cast<double>(finalizeQueueWaitUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"render_queue_push_block_ms", static_cast<double>(renderQueuePushBlockUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"layout_queue_push_block_ms", static_cast<double>(layoutQueuePushBlockUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"plan_queue_push_block_ms", static_cast<double>(planQueuePushBlockUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"ocr_table_queue_push_block_ms", static_cast<double>(ocrTableQueuePushBlockUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"queue_backpressure_ms", static_cast<double>(queueBackpressureUsTotal_.load(std::memory_order_relaxed)) / 1000.0},
+            {"pipeline_overlap_factor", overlapFactorMean},
+            {"pipeline_mode", pipelineMode},
             {"text_boxes_raw_count", textBoxesRawCountTotal_.load(std::memory_order_relaxed)},
             {"text_boxes_after_dedup_count", textBoxesAfterDedupCountTotal_.load(std::memory_order_relaxed)},
             {"table_boxes_raw_count", tableBoxesRawCountTotal_.load(std::memory_order_relaxed)},
@@ -1747,6 +1880,37 @@ void DocServer::recordPipelineStats(const DocumentResult& result, double pipelin
     const uint64_t outputGenUs = msToUs(result.stats.outputGenTimeMs);
     const uint64_t npuUs = msToUs(result.stats.npuSerialTimeMs);
     const uint64_t cpuUs = msToUs(result.stats.cpuOnlyTimeMs);
+    const uint64_t npuServiceUs = msToUs(result.stats.npuServiceTimeMs);
+    const uint64_t npuSlotWaitUs = msToUs(result.stats.npuSlotWaitTimeMs);
+    const uint64_t layoutNpuServiceUs = msToUs(result.stats.layoutNpuServiceTimeMs);
+    const uint64_t layoutNpuSlotWaitUs = msToUs(result.stats.layoutNpuSlotWaitTimeMs);
+    const uint64_t ocrOuterSlotHoldUs = msToUs(result.stats.ocrOuterSlotHoldTimeMs);
+    const uint64_t ocrSubmoduleWindowUs = msToUs(result.stats.ocrSubmoduleWindowTimeMs);
+    const uint64_t ocrSlotWaitUs = msToUs(result.stats.ocrSlotWaitTimeMs);
+    const uint64_t ocrCollectWaitUs = msToUs(result.stats.ocrCollectWaitTimeMs);
+    const uint64_t ocrInflightPeak = countToUInt(result.stats.ocrInflightPeak);
+    const uint64_t ocrBufferedOutOfOrderCount =
+        countToUInt(result.stats.ocrBufferedOutOfOrderCount);
+    const uint64_t tableNpuServiceUs = msToUs(result.stats.tableNpuServiceTimeMs);
+    const uint64_t tableNpuSlotWaitUs = msToUs(result.stats.tableNpuSlotWaitTimeMs);
+    const uint64_t tableOcrServiceUs = msToUs(result.stats.tableOcrServiceTimeMs);
+    const uint64_t tableOcrSlotWaitUs = msToUs(result.stats.tableOcrSlotWaitTimeMs);
+    const uint64_t cpuPreUs = msToUs(result.stats.cpuPreTimeMs);
+    const uint64_t cpuPostUs = msToUs(result.stats.cpuPostTimeMs);
+    const uint64_t finalizeCpuUs = msToUs(result.stats.finalizeCpuTimeMs);
+    const uint64_t tableFinalizeUs = msToUs(result.stats.tableFinalizeTimeMs);
+    const uint64_t ocrCollectOrMergeUs = msToUs(result.stats.ocrCollectOrMergeTimeMs);
+    const uint64_t layoutQueueWaitUs = msToUs(result.stats.layoutQueueWaitTimeMs);
+    const uint64_t planQueueWaitUs = msToUs(result.stats.planQueueWaitTimeMs);
+    const uint64_t ocrTableQueueWaitUs = msToUs(result.stats.ocrTableQueueWaitTimeMs);
+    const uint64_t finalizeQueueWaitUs = msToUs(result.stats.finalizeQueueWaitTimeMs);
+    const uint64_t renderQueuePushBlockUs = msToUs(result.stats.renderQueuePushBlockTimeMs);
+    const uint64_t layoutQueuePushBlockUs = msToUs(result.stats.layoutQueuePushBlockTimeMs);
+    const uint64_t planQueuePushBlockUs = msToUs(result.stats.planQueuePushBlockTimeMs);
+    const uint64_t ocrTableQueuePushBlockUs = msToUs(result.stats.ocrTableQueuePushBlockTimeMs);
+    const uint64_t queueBackpressureUs = msToUs(result.stats.queueBackpressureTimeMs);
+    const uint64_t overlapFactorMilli =
+        countToUInt(result.stats.pipelineOverlapFactor * 1000.0);
     const uint64_t textBoxesRawCount = countToUInt(result.stats.textBoxesRawCount);
     const uint64_t textBoxesAfterDedupCount = countToUInt(result.stats.textBoxesAfterDedupCount);
     const uint64_t tableBoxesRawCount = countToUInt(result.stats.tableBoxesRawCount);
@@ -1783,6 +1947,37 @@ void DocServer::recordPipelineStats(const DocumentResult& result, double pipelin
     outputGenUsTotal_.fetch_add(outputGenUs, std::memory_order_relaxed);
     npuStageUsTotal_.fetch_add(npuUs, std::memory_order_relaxed);
     cpuStageUsTotal_.fetch_add(cpuUs, std::memory_order_relaxed);
+    npuServiceUsTotal_.fetch_add(npuServiceUs, std::memory_order_relaxed);
+    npuSlotWaitUsTotal_.fetch_add(npuSlotWaitUs, std::memory_order_relaxed);
+    layoutNpuServiceUsTotal_.fetch_add(layoutNpuServiceUs, std::memory_order_relaxed);
+    layoutNpuSlotWaitUsTotal_.fetch_add(layoutNpuSlotWaitUs, std::memory_order_relaxed);
+    ocrOuterSlotHoldUsTotal_.fetch_add(ocrOuterSlotHoldUs, std::memory_order_relaxed);
+    ocrSubmoduleWindowUsTotal_.fetch_add(ocrSubmoduleWindowUs, std::memory_order_relaxed);
+    ocrSlotWaitUsTotal_.fetch_add(ocrSlotWaitUs, std::memory_order_relaxed);
+    ocrCollectWaitUsTotal_.fetch_add(ocrCollectWaitUs, std::memory_order_relaxed);
+    ocrInflightPeakTotal_.fetch_add(ocrInflightPeak, std::memory_order_relaxed);
+    ocrBufferedOutOfOrderCountTotal_.fetch_add(
+        ocrBufferedOutOfOrderCount, std::memory_order_relaxed);
+    tableNpuServiceUsTotal_.fetch_add(tableNpuServiceUs, std::memory_order_relaxed);
+    tableNpuSlotWaitUsTotal_.fetch_add(tableNpuSlotWaitUs, std::memory_order_relaxed);
+    tableOcrServiceUsTotal_.fetch_add(tableOcrServiceUs, std::memory_order_relaxed);
+    tableOcrSlotWaitUsTotal_.fetch_add(tableOcrSlotWaitUs, std::memory_order_relaxed);
+    cpuPreUsTotal_.fetch_add(cpuPreUs, std::memory_order_relaxed);
+    cpuPostUsTotal_.fetch_add(cpuPostUs, std::memory_order_relaxed);
+    finalizeCpuUsTotal_.fetch_add(finalizeCpuUs, std::memory_order_relaxed);
+    tableFinalizeUsTotal_.fetch_add(tableFinalizeUs, std::memory_order_relaxed);
+    ocrCollectOrMergeUsTotal_.fetch_add(ocrCollectOrMergeUs, std::memory_order_relaxed);
+    layoutQueueWaitUsTotal_.fetch_add(layoutQueueWaitUs, std::memory_order_relaxed);
+    planQueueWaitUsTotal_.fetch_add(planQueueWaitUs, std::memory_order_relaxed);
+    ocrTableQueueWaitUsTotal_.fetch_add(ocrTableQueueWaitUs, std::memory_order_relaxed);
+    finalizeQueueWaitUsTotal_.fetch_add(finalizeQueueWaitUs, std::memory_order_relaxed);
+    renderQueuePushBlockUsTotal_.fetch_add(renderQueuePushBlockUs, std::memory_order_relaxed);
+    layoutQueuePushBlockUsTotal_.fetch_add(layoutQueuePushBlockUs, std::memory_order_relaxed);
+    planQueuePushBlockUsTotal_.fetch_add(planQueuePushBlockUs, std::memory_order_relaxed);
+    ocrTableQueuePushBlockUsTotal_.fetch_add(
+        ocrTableQueuePushBlockUs, std::memory_order_relaxed);
+    queueBackpressureUsTotal_.fetch_add(queueBackpressureUs, std::memory_order_relaxed);
+    pipelineOverlapFactorMilliTotal_.fetch_add(overlapFactorMilli, std::memory_order_relaxed);
     textBoxesRawCountTotal_.fetch_add(textBoxesRawCount, std::memory_order_relaxed);
     textBoxesAfterDedupCountTotal_.fetch_add(
         textBoxesAfterDedupCount, std::memory_order_relaxed);
@@ -1806,6 +2001,11 @@ void DocServer::recordPipelineStats(const DocumentResult& result, double pipelin
     ocrTimeoutCountTotal_.fetch_add(ocrTimeoutCount, std::memory_order_relaxed);
     ocrBufferedResultHitCountTotal_.fetch_add(
         ocrBufferedResultHitCount, std::memory_order_relaxed);
+    if (result.stats.pipelineMode == "page_pipeline_mvp") {
+        pagePipelineModeCount_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        serialModeCount_.fetch_add(1, std::memory_order_relaxed);
+    }
     updateAtomicMax(lockWaitUsMax_, waitUs);
     updateAtomicMax(lockHoldUsMax_, holdUs);
 }

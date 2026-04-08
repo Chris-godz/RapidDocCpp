@@ -6,6 +6,7 @@
 #include "server/server.h"
 #include "common/config.h"
 #include "common/logger.h"
+#include <algorithm>
 #include <iostream>
 #include <csignal>
 #include <cstdlib>
@@ -34,6 +35,9 @@ void printUsage(const char* programName) {
     std::cout << "      --topology <mode> single_pipeline|single_process_multi_device|single_card_backend\n";
     std::cout << "      --routing-policy <p> Routing policy (default: least_inflight_rr)\n";
     std::cout << "      --server-id <id>  Stable server/backend identifier\n";
+    std::cout << "      --pipeline-mode <m> serial|page_pipeline_mvp\n";
+    std::cout << "      --ocr-outer-mode <m> immediate_per_task|shadow_windowed_collect\n";
+    std::cout << "      --ocr-shadow-window <n> Max OCR inflight window for shadow mode (default: 8)\n";
     std::cout << "      --no-ocr          Disable OCR stage\n";
     std::cout << "      --no-table        Disable wired table stage\n";
     std::cout << "  -h, --help            Show this help\n";
@@ -73,6 +77,9 @@ int main(int argc, char* argv[]) {
         {"topology", required_argument, nullptr, 258},
         {"routing-policy", required_argument, nullptr, 259},
         {"server-id", required_argument, nullptr, 260},
+        {"pipeline-mode", required_argument, nullptr, 263},
+        {"ocr-outer-mode", required_argument, nullptr, 264},
+        {"ocr-shadow-window", required_argument, nullptr, 265},
         {"no-ocr", no_argument, nullptr, 261},
         {"no-table", no_argument, nullptr, 262},
         {"help",    no_argument,       nullptr, 'h'},
@@ -100,6 +107,25 @@ int main(int argc, char* argv[]) {
                 break;
             case 260:
                 config.serverId = optarg;
+                break;
+            case 263:
+                if (!rapid_doc::parsePipelineMode(optarg, config.pipelineConfig.runtime.pipelineMode)) {
+                    std::cerr << "Invalid --pipeline-mode: " << optarg << "\n";
+                    return 1;
+                }
+                break;
+            case 264:
+                if (!rapid_doc::parseOcrOuterMode(optarg, config.pipelineConfig.runtime.ocrOuterMode)) {
+                    std::cerr << "Invalid --ocr-outer-mode: " << optarg << "\n";
+                    return 1;
+                }
+                break;
+            case 265:
+                {
+                    const long long parsed = std::strtoll(optarg, nullptr, 10);
+                    config.pipelineConfig.runtime.ocrShadowWindow =
+                        parsed > 0 ? static_cast<size_t>(parsed) : 1;
+                }
                 break;
             case 261:
                 config.pipelineConfig.stages.enableOcr = false;

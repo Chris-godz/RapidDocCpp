@@ -42,11 +42,15 @@ public:
         TableType type = TableType::UNKNOWN;
         bool supported = false;
         cv::Mat mask;
+        cv::Mat preprocessedInput;
+        std::vector<int64_t> rawMaskData;
         float scale = 1.0f;
         int padTop = 0;
         int padLeft = 0;
         int origH = 0;
         int origW = 0;
+        int maskH = 0;
+        int maskW = 0;
         double estimateTableTypeMs = 0.0;
         double preprocessMs = 0.0;
         double dxRunMs = 0.0;
@@ -72,6 +76,25 @@ public:
      *       For wireless tables, this will return result with supported=false.
      */
     TableResult recognize(const cv::Mat& tableImage);
+
+    /**
+     * @brief Prepare CPU-side table NPU inputs without invoking DX runtime.
+     * @param tableImage Cropped table region (BGR)
+     * @return Partially filled NPU stage result with preprocess artifacts
+     */
+    NpuStageResult prepareNpuInput(const cv::Mat& tableImage);
+
+    /**
+     * @brief Execute only the DX runtime call for a prepared table input.
+     * @param npuStage Prepared NPU stage result from prepareNpuInput()
+     */
+    void runPreparedNpu(NpuStageResult& npuStage);
+
+    /**
+     * @brief Decode raw table mask output into CV mat after DX runtime returns.
+     * @param npuStage Prepared/run stage result to populate with mask
+     */
+    void decodePreparedMask(NpuStageResult& npuStage);
 
     /**
      * @brief Run only the NPU-dependent phase (estimate/preprocess/dx_run/mask_decode).

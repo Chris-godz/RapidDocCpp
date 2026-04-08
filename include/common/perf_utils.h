@@ -20,5 +20,7 @@ PercentileSummary summarizeSamples(std::vector<double> samples);
 DocumentStageStats accumulateDocumentStageStats(const std::vector<PageResult>& pages);
 double totalTrackedStageTimeMs(const PageStageStats& stats);
 double totalTrackedStageTimeMs(const DocumentStageStats& stats);
+double computePipelineOverlapFactor(const PageStageStats& stats, double wallTimeMs);
+double computePipelineOverlapFactor(const DocumentStageStats& stats, double wallTimeMs);
 
 } // namespace rapid_doc
