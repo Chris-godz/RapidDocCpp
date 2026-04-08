@@ -52,11 +52,15 @@ struct BenchmarkIterationResult {
     std::vector<double> pageTimesMs;
     std::string markdownSha256;
     std::string contentListSha256;
+    std::string pipelineMode = "serial";
+    std::string ocrOuterMode = "immediate_per_task";
 };
 
 struct BenchmarkCaseResult {
     BenchmarkCaseDefinition definition;
     int warmupIterations = 0;
+    PipelineMode pipelineMode = PipelineMode::Serial;
+    OcrOuterMode ocrOuterMode = OcrOuterMode::ImmediatePerTask;
     std::string status = "ok";
     std::string error;
     std::vector<BenchmarkIterationResult> iterations;
@@ -72,6 +76,13 @@ std::string formatCount(double value) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(2) << value;
     return out.str();
+}
+
+double pagesPerSecond(int processedPages, double totalTimeMs) {
+    if (processedPages <= 0 || totalTimeMs <= 0.0) {
+        return 0.0;
+    }
+    return static_cast<double>(processedPages) * 1000.0 / totalTimeMs;
 }
 
 namespace sha256 {
@@ -213,6 +224,36 @@ json stageStatsToJson(const DocumentStageStats& stats) {
         {"cpu_only_ms", stats.cpuOnlyTimeMs},
         {"npu_lock_wait_ms", stats.npuLockWaitTimeMs},
         {"npu_lock_hold_ms", stats.npuLockHoldTimeMs},
+        {"npu_service_ms", stats.npuServiceTimeMs},
+        {"npu_slot_wait_ms", stats.npuSlotWaitTimeMs},
+        {"layout_npu_service_ms", stats.layoutNpuServiceTimeMs},
+        {"layout_npu_slot_wait_ms", stats.layoutNpuSlotWaitTimeMs},
+        {"ocr_outer_slot_hold_ms", stats.ocrOuterSlotHoldTimeMs},
+        {"ocr_submodule_window_ms", stats.ocrSubmoduleWindowTimeMs},
+        {"ocr_slot_wait_ms", stats.ocrSlotWaitTimeMs},
+        {"ocr_collect_wait_ms", stats.ocrCollectWaitTimeMs},
+        {"ocr_inflight_peak", stats.ocrInflightPeak},
+        {"ocr_buffered_out_of_order_count", stats.ocrBufferedOutOfOrderCount},
+        {"table_npu_service_ms", stats.tableNpuServiceTimeMs},
+        {"table_npu_slot_wait_ms", stats.tableNpuSlotWaitTimeMs},
+        {"table_ocr_service_ms", stats.tableOcrServiceTimeMs},
+        {"table_ocr_slot_wait_ms", stats.tableOcrSlotWaitTimeMs},
+        {"cpu_pre_ms", stats.cpuPreTimeMs},
+        {"cpu_post_ms", stats.cpuPostTimeMs},
+        {"finalize_cpu_ms", stats.finalizeCpuTimeMs},
+        {"table_finalize_ms", stats.tableFinalizeTimeMs},
+        {"ocr_collect_or_merge_ms", stats.ocrCollectOrMergeTimeMs},
+        {"layout_queue_wait_ms", stats.layoutQueueWaitTimeMs},
+        {"plan_queue_wait_ms", stats.planQueueWaitTimeMs},
+        {"ocr_table_queue_wait_ms", stats.ocrTableQueueWaitTimeMs},
+        {"finalize_queue_wait_ms", stats.finalizeQueueWaitTimeMs},
+        {"render_queue_push_block_ms", stats.renderQueuePushBlockTimeMs},
+        {"layout_queue_push_block_ms", stats.layoutQueuePushBlockTimeMs},
+        {"plan_queue_push_block_ms", stats.planQueuePushBlockTimeMs},
+        {"ocr_table_queue_push_block_ms", stats.ocrTableQueuePushBlockTimeMs},
+        {"queue_backpressure_ms", stats.queueBackpressureTimeMs},
+        {"pipeline_overlap_factor", stats.pipelineOverlapFactor},
+        {"pipeline_mode", stats.pipelineMode},
         {"text_boxes_raw_count", stats.textBoxesRawCount},
         {"text_boxes_after_dedup_count", stats.textBoxesAfterDedupCount},
         {"table_boxes_raw_count", stats.tableBoxesRawCount},
@@ -241,6 +282,7 @@ json stageStatsToJson(const DocumentStageStats& stats) {
 json benchmarkStatsToJson(const BenchmarkIterationResult& iteration) {
     return json{
         {"time_ms", iteration.totalTimeMs},
+        {"pages_per_sec", pagesPerSecond(iteration.processedPages, iteration.totalTimeMs)},
         {"pdf_render_ms", iteration.stageStats.pdfRenderTimeMs},
         {"layout_ms", iteration.stageStats.layoutTimeMs},
         {"ocr_ms", iteration.stageStats.ocrTimeMs},
@@ -251,6 +293,36 @@ json benchmarkStatsToJson(const BenchmarkIterationResult& iteration) {
         {"cpu_only_ms", iteration.stageStats.cpuOnlyTimeMs},
         {"npu_lock_wait_ms", iteration.stageStats.npuLockWaitTimeMs},
         {"npu_lock_hold_ms", iteration.stageStats.npuLockHoldTimeMs},
+        {"npu_service_ms", iteration.stageStats.npuServiceTimeMs},
+        {"npu_slot_wait_ms", iteration.stageStats.npuSlotWaitTimeMs},
+        {"layout_npu_service_ms", iteration.stageStats.layoutNpuServiceTimeMs},
+        {"layout_npu_slot_wait_ms", iteration.stageStats.layoutNpuSlotWaitTimeMs},
+        {"ocr_outer_slot_hold_ms", iteration.stageStats.ocrOuterSlotHoldTimeMs},
+        {"ocr_submodule_window_ms", iteration.stageStats.ocrSubmoduleWindowTimeMs},
+        {"ocr_slot_wait_ms", iteration.stageStats.ocrSlotWaitTimeMs},
+        {"ocr_collect_wait_ms", iteration.stageStats.ocrCollectWaitTimeMs},
+        {"ocr_inflight_peak", iteration.stageStats.ocrInflightPeak},
+        {"ocr_buffered_out_of_order_count", iteration.stageStats.ocrBufferedOutOfOrderCount},
+        {"table_npu_service_ms", iteration.stageStats.tableNpuServiceTimeMs},
+        {"table_npu_slot_wait_ms", iteration.stageStats.tableNpuSlotWaitTimeMs},
+        {"table_ocr_service_ms", iteration.stageStats.tableOcrServiceTimeMs},
+        {"table_ocr_slot_wait_ms", iteration.stageStats.tableOcrSlotWaitTimeMs},
+        {"cpu_pre_ms", iteration.stageStats.cpuPreTimeMs},
+        {"cpu_post_ms", iteration.stageStats.cpuPostTimeMs},
+        {"finalize_cpu_ms", iteration.stageStats.finalizeCpuTimeMs},
+        {"table_finalize_ms", iteration.stageStats.tableFinalizeTimeMs},
+        {"ocr_collect_or_merge_ms", iteration.stageStats.ocrCollectOrMergeTimeMs},
+        {"layout_queue_wait_ms", iteration.stageStats.layoutQueueWaitTimeMs},
+        {"plan_queue_wait_ms", iteration.stageStats.planQueueWaitTimeMs},
+        {"ocr_table_queue_wait_ms", iteration.stageStats.ocrTableQueueWaitTimeMs},
+        {"finalize_queue_wait_ms", iteration.stageStats.finalizeQueueWaitTimeMs},
+        {"render_queue_push_block_ms", iteration.stageStats.renderQueuePushBlockTimeMs},
+        {"layout_queue_push_block_ms", iteration.stageStats.layoutQueuePushBlockTimeMs},
+        {"plan_queue_push_block_ms", iteration.stageStats.planQueuePushBlockTimeMs},
+        {"ocr_table_queue_push_block_ms", iteration.stageStats.ocrTableQueuePushBlockTimeMs},
+        {"queue_backpressure_ms", iteration.stageStats.queueBackpressureTimeMs},
+        {"pipeline_overlap_factor", iteration.stageStats.pipelineOverlapFactor},
+        {"pipeline_mode", iteration.pipelineMode},
         {"text_boxes_raw_count", iteration.stageStats.textBoxesRawCount},
         {"text_boxes_after_dedup_count", iteration.stageStats.textBoxesAfterDedupCount},
         {"table_boxes_raw_count", iteration.stageStats.tableBoxesRawCount},
@@ -300,6 +372,35 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
         mean.cpuOnlyTimeMs += iteration.stageStats.cpuOnlyTimeMs;
         mean.npuLockWaitTimeMs += iteration.stageStats.npuLockWaitTimeMs;
         mean.npuLockHoldTimeMs += iteration.stageStats.npuLockHoldTimeMs;
+        mean.npuServiceTimeMs += iteration.stageStats.npuServiceTimeMs;
+        mean.npuSlotWaitTimeMs += iteration.stageStats.npuSlotWaitTimeMs;
+        mean.layoutNpuServiceTimeMs += iteration.stageStats.layoutNpuServiceTimeMs;
+        mean.layoutNpuSlotWaitTimeMs += iteration.stageStats.layoutNpuSlotWaitTimeMs;
+        mean.ocrOuterSlotHoldTimeMs += iteration.stageStats.ocrOuterSlotHoldTimeMs;
+        mean.ocrSubmoduleWindowTimeMs += iteration.stageStats.ocrSubmoduleWindowTimeMs;
+        mean.ocrSlotWaitTimeMs += iteration.stageStats.ocrSlotWaitTimeMs;
+        mean.ocrCollectWaitTimeMs += iteration.stageStats.ocrCollectWaitTimeMs;
+        mean.ocrInflightPeak += iteration.stageStats.ocrInflightPeak;
+        mean.ocrBufferedOutOfOrderCount += iteration.stageStats.ocrBufferedOutOfOrderCount;
+        mean.tableNpuServiceTimeMs += iteration.stageStats.tableNpuServiceTimeMs;
+        mean.tableNpuSlotWaitTimeMs += iteration.stageStats.tableNpuSlotWaitTimeMs;
+        mean.tableOcrServiceTimeMs += iteration.stageStats.tableOcrServiceTimeMs;
+        mean.tableOcrSlotWaitTimeMs += iteration.stageStats.tableOcrSlotWaitTimeMs;
+        mean.cpuPreTimeMs += iteration.stageStats.cpuPreTimeMs;
+        mean.cpuPostTimeMs += iteration.stageStats.cpuPostTimeMs;
+        mean.finalizeCpuTimeMs += iteration.stageStats.finalizeCpuTimeMs;
+        mean.tableFinalizeTimeMs += iteration.stageStats.tableFinalizeTimeMs;
+        mean.ocrCollectOrMergeTimeMs += iteration.stageStats.ocrCollectOrMergeTimeMs;
+        mean.layoutQueueWaitTimeMs += iteration.stageStats.layoutQueueWaitTimeMs;
+        mean.planQueueWaitTimeMs += iteration.stageStats.planQueueWaitTimeMs;
+        mean.ocrTableQueueWaitTimeMs += iteration.stageStats.ocrTableQueueWaitTimeMs;
+        mean.finalizeQueueWaitTimeMs += iteration.stageStats.finalizeQueueWaitTimeMs;
+        mean.renderQueuePushBlockTimeMs += iteration.stageStats.renderQueuePushBlockTimeMs;
+        mean.layoutQueuePushBlockTimeMs += iteration.stageStats.layoutQueuePushBlockTimeMs;
+        mean.planQueuePushBlockTimeMs += iteration.stageStats.planQueuePushBlockTimeMs;
+        mean.ocrTableQueuePushBlockTimeMs += iteration.stageStats.ocrTableQueuePushBlockTimeMs;
+        mean.queueBackpressureTimeMs += iteration.stageStats.queueBackpressureTimeMs;
+        mean.pipelineOverlapFactor += iteration.stageStats.pipelineOverlapFactor;
         mean.textBoxesRawCount += iteration.stageStats.textBoxesRawCount;
         mean.textBoxesAfterDedupCount += iteration.stageStats.textBoxesAfterDedupCount;
         mean.tableBoxesRawCount += iteration.stageStats.tableBoxesRawCount;
@@ -341,6 +442,35 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
     mean.cpuOnlyTimeMs /= denom;
     mean.npuLockWaitTimeMs /= denom;
     mean.npuLockHoldTimeMs /= denom;
+    mean.npuServiceTimeMs /= denom;
+    mean.npuSlotWaitTimeMs /= denom;
+    mean.layoutNpuServiceTimeMs /= denom;
+    mean.layoutNpuSlotWaitTimeMs /= denom;
+    mean.ocrOuterSlotHoldTimeMs /= denom;
+    mean.ocrSubmoduleWindowTimeMs /= denom;
+    mean.ocrSlotWaitTimeMs /= denom;
+    mean.ocrCollectWaitTimeMs /= denom;
+    mean.ocrInflightPeak /= denom;
+    mean.ocrBufferedOutOfOrderCount /= denom;
+    mean.tableNpuServiceTimeMs /= denom;
+    mean.tableNpuSlotWaitTimeMs /= denom;
+    mean.tableOcrServiceTimeMs /= denom;
+    mean.tableOcrSlotWaitTimeMs /= denom;
+    mean.cpuPreTimeMs /= denom;
+    mean.cpuPostTimeMs /= denom;
+    mean.finalizeCpuTimeMs /= denom;
+    mean.tableFinalizeTimeMs /= denom;
+    mean.ocrCollectOrMergeTimeMs /= denom;
+    mean.layoutQueueWaitTimeMs /= denom;
+    mean.planQueueWaitTimeMs /= denom;
+    mean.ocrTableQueueWaitTimeMs /= denom;
+    mean.finalizeQueueWaitTimeMs /= denom;
+    mean.renderQueuePushBlockTimeMs /= denom;
+    mean.layoutQueuePushBlockTimeMs /= denom;
+    mean.planQueuePushBlockTimeMs /= denom;
+    mean.ocrTableQueuePushBlockTimeMs /= denom;
+    mean.queueBackpressureTimeMs /= denom;
+    mean.pipelineOverlapFactor /= denom;
     mean.textBoxesRawCount /= denom;
     mean.textBoxesAfterDedupCount /= denom;
     mean.tableBoxesRawCount /= denom;
@@ -366,6 +496,7 @@ DocumentStageStats meanStageStats(const std::vector<BenchmarkIterationResult>& i
         mean.ocrSubmitAreaP50 = ocrSubmitAreaP50Weighted / ocrSubmitCountTotal;
         mean.ocrSubmitAreaP95 = ocrSubmitAreaP95Weighted / ocrSubmitCountTotal;
     }
+    mean.pipelineMode = iterations.front().pipelineMode;
     return mean;
 }
 
@@ -386,6 +517,8 @@ BenchmarkIterationResult runOnce(DocPipeline& pipeline, const std::string& input
     }
     iteration.markdownSha256 = sha256::digest(result.markdown);
     iteration.contentListSha256 = sha256::digest(result.contentListJson);
+    iteration.pipelineMode = result.stats.pipelineMode;
+    iteration.ocrOuterMode = ocrOuterModeToString(pipeline.config().runtime.ocrOuterMode);
     return iteration;
 }
 
@@ -394,10 +527,18 @@ BenchmarkCaseResult runBenchmarkCase(
     int warmupIterations,
     int measureIterations,
     const std::string& projectRoot,
-    const std::string& outputRoot)
+    const std::string& outputRoot,
+    PipelineMode pipelineMode,
+    OcrOuterMode ocrOuterMode,
+    size_t ocrShadowWindow)
 {
     PipelineConfig config = PipelineConfig::Default(projectRoot);
-    config.runtime.outputDir = (fs::path(outputRoot) / definition.name).string();
+    config.runtime.pipelineMode = pipelineMode;
+    config.runtime.ocrOuterMode = ocrOuterMode;
+    config.runtime.ocrShadowWindow = std::max<size_t>(1, ocrShadowWindow);
+    config.runtime.outputDir =
+        (fs::path(outputRoot) / definition.name / pipelineModeToString(pipelineMode) /
+         ocrOuterModeToString(ocrOuterMode)).string();
     config.runtime.saveImages = false;
     config.runtime.saveVisualization = false;
     definition.configure(config);
@@ -410,6 +551,8 @@ BenchmarkCaseResult runBenchmarkCase(
     BenchmarkCaseResult result;
     result.definition = definition;
     result.warmupIterations = warmupIterations;
+    result.pipelineMode = pipelineMode;
+    result.ocrOuterMode = ocrOuterMode;
 
     for (int i = 0; i < warmupIterations; ++i) {
         (void)runOnce(pipeline, definition.inputPath);
@@ -484,6 +627,8 @@ json buildJsonSummary(const BenchmarkCaseResult& result) {
     if (result.status != "ok") {
         return json{
             {"name", result.definition.name},
+            {"pipeline_mode", pipelineModeToString(result.pipelineMode)},
+            {"ocr_outer_mode", ocrOuterModeToString(result.ocrOuterMode)},
             {"description", result.definition.description},
             {"input_path", result.definition.inputPath},
             {"warmup_iterations", result.warmupIterations},
@@ -527,10 +672,16 @@ json buildJsonSummary(const BenchmarkCaseResult& result) {
     BenchmarkIterationResult meanIteration;
     meanIteration.totalTimeMs = documentSummary.meanMs;
     meanIteration.pipelineCallMs = pipelineCallSummary.meanMs;
+    meanIteration.processedPages =
+        result.iterations.empty() ? 0 : result.iterations.front().processedPages;
     meanIteration.stageStats = meanStages;
+    meanIteration.pipelineMode = pipelineModeToString(result.pipelineMode);
+    meanIteration.ocrOuterMode = ocrOuterModeToString(result.ocrOuterMode);
 
     return json{
         {"name", result.definition.name},
+        {"pipeline_mode", pipelineModeToString(result.pipelineMode)},
+        {"ocr_outer_mode", ocrOuterModeToString(result.ocrOuterMode)},
         {"description", result.definition.description},
         {"input_path", result.definition.inputPath},
         {"warmup_iterations", result.warmupIterations},
@@ -545,6 +696,7 @@ json buildJsonSummary(const BenchmarkCaseResult& result) {
         {"markdown_hash_consistent", markdownHashes.size() <= 1},
         {"content_list_sha256", contentListHashes.empty() ? std::string() : *contentListHashes.begin()},
         {"content_list_hash_consistent", contentListHashes.size() <= 1},
+        {"hash_mismatch", markdownHashes.size() > 1 || contentListHashes.size() > 1},
         {"iterations", std::move(rawIterations)},
     };
 }
@@ -552,6 +704,8 @@ json buildJsonSummary(const BenchmarkCaseResult& result) {
 std::string buildHumanSummary(const json& summary) {
     std::ostringstream out;
     out << summary.value("name", "(unknown)") << "\n";
+    out << "  pipeline_mode: " << summary.value("pipeline_mode", "serial") << "\n";
+    out << "  ocr_outer_mode: " << summary.value("ocr_outer_mode", "immediate_per_task") << "\n";
     out << "  description: " << summary.value("description", "") << "\n";
     out << "  input: " << summary.value("input_path", "") << "\n";
     if (summary.value("status", "ok") != "ok") {
@@ -583,6 +737,10 @@ std::string buildHumanSummary(const json& summary) {
         ? 0
         : iterations.front().value("processed_pages", 0);
     out << "  pages_per_iteration: " << pagesPerIteration << "\n";
+    out << "  pages_per_sec: "
+        << formatCount(summary.at("mean_stats").value("pages_per_sec", 0.0)) << "\n";
+    out << "  overlap_factor: "
+        << formatCount(stageBreakdown.value("pipeline_overlap_factor", 0.0)) << "\n";
     out << "  mean_stage_breakdown:\n";
     out << "    pdf_render=" << formatMs(stageBreakdown.value("pdf_render_ms", 0.0))
         << ", layout=" << formatMs(stageBreakdown.value("layout_ms", 0.0))
@@ -594,6 +752,32 @@ std::string buildHumanSummary(const json& summary) {
         << ", cpu_only=" << formatMs(stageBreakdown.value("cpu_only_ms", 0.0))
         << ", npu_lock_wait=" << formatMs(stageBreakdown.value("npu_lock_wait_ms", 0.0))
         << ", npu_lock_hold=" << formatMs(stageBreakdown.value("npu_lock_hold_ms", 0.0))
+        << ", npu_service=" << formatMs(stageBreakdown.value("npu_service_ms", 0.0))
+        << ", npu_slot_wait=" << formatMs(stageBreakdown.value("npu_slot_wait_ms", 0.0))
+        << ", layout_npu_service=" << formatMs(stageBreakdown.value("layout_npu_service_ms", 0.0))
+        << ", layout_npu_slot_wait=" << formatMs(stageBreakdown.value("layout_npu_slot_wait_ms", 0.0))
+        << ", ocr_outer_slot_hold=" << formatMs(stageBreakdown.value("ocr_outer_slot_hold_ms", 0.0))
+        << ", ocr_submodule_window=" << formatMs(stageBreakdown.value("ocr_submodule_window_ms", 0.0))
+        << ", ocr_slot_wait=" << formatMs(stageBreakdown.value("ocr_slot_wait_ms", 0.0))
+        << ", ocr_collect_wait=" << formatMs(stageBreakdown.value("ocr_collect_wait_ms", 0.0))
+        << ", table_npu_service=" << formatMs(stageBreakdown.value("table_npu_service_ms", 0.0))
+        << ", table_npu_slot_wait=" << formatMs(stageBreakdown.value("table_npu_slot_wait_ms", 0.0))
+        << ", table_ocr_service=" << formatMs(stageBreakdown.value("table_ocr_service_ms", 0.0))
+        << ", table_ocr_slot_wait=" << formatMs(stageBreakdown.value("table_ocr_slot_wait_ms", 0.0))
+        << ", cpu_pre=" << formatMs(stageBreakdown.value("cpu_pre_ms", 0.0))
+        << ", cpu_post=" << formatMs(stageBreakdown.value("cpu_post_ms", 0.0))
+        << ", finalize_cpu=" << formatMs(stageBreakdown.value("finalize_cpu_ms", 0.0))
+        << ", table_finalize=" << formatMs(stageBreakdown.value("table_finalize_ms", 0.0))
+        << ", ocr_collect_or_merge=" << formatMs(stageBreakdown.value("ocr_collect_or_merge_ms", 0.0))
+        << ", layout_queue_wait=" << formatMs(stageBreakdown.value("layout_queue_wait_ms", 0.0))
+        << ", plan_queue_wait=" << formatMs(stageBreakdown.value("plan_queue_wait_ms", 0.0))
+        << ", ocr_table_queue_wait=" << formatMs(stageBreakdown.value("ocr_table_queue_wait_ms", 0.0))
+        << ", finalize_queue_wait=" << formatMs(stageBreakdown.value("finalize_queue_wait_ms", 0.0))
+        << ", render_queue_push_block=" << formatMs(stageBreakdown.value("render_queue_push_block_ms", 0.0))
+        << ", layout_queue_push_block=" << formatMs(stageBreakdown.value("layout_queue_push_block_ms", 0.0))
+        << ", plan_queue_push_block=" << formatMs(stageBreakdown.value("plan_queue_push_block_ms", 0.0))
+        << ", ocr_table_queue_push_block=" << formatMs(stageBreakdown.value("ocr_table_queue_push_block_ms", 0.0))
+        << ", queue_backpressure=" << formatMs(stageBreakdown.value("queue_backpressure_ms", 0.0))
         << ", figure=" << formatMs(stageBreakdown.value("figure_ms", 0.0))
         << ", formula=" << formatMs(stageBreakdown.value("formula_ms", 0.0))
         << ", unsupported=" << formatMs(stageBreakdown.value("unsupported_ms", 0.0))
@@ -620,9 +804,12 @@ std::string buildHumanSummary(const json& summary) {
         << ", table_dedup_skipped=" << formatCount(stageBreakdown.value("table_dedup_skipped_count", 0.0))
         << ", ocr_timeout=" << formatCount(stageBreakdown.value("ocr_timeout_count", 0.0))
         << ", ocr_buffered_result_hit=" << formatCount(stageBreakdown.value("ocr_buffered_result_hit_count", 0.0))
+        << ", ocr_inflight_peak=" << formatCount(stageBreakdown.value("ocr_inflight_peak", 0.0))
+        << ", ocr_buffered_out_of_order=" << formatCount(stageBreakdown.value("ocr_buffered_out_of_order_count", 0.0))
         << "\n";
     out << "  markdown_sha256: " << summary.value("markdown_sha256", "") << "\n";
     out << "  content_list_sha256: " << summary.value("content_list_sha256", "") << "\n";
+    out << "  hash_mismatch: " << (summary.value("hash_mismatch", false) ? "true" : "false") << "\n";
     return out.str();
 }
 
@@ -644,7 +831,10 @@ int runWorkerMode(
     int iterations,
     const std::string& projectRoot,
     const std::string& outputDir,
-    const std::string& jsonOutPath)
+    const std::string& jsonOutPath,
+    PipelineMode pipelineMode,
+    OcrOuterMode ocrOuterMode,
+    size_t ocrShadowWindow)
 {
     const auto definitions = makeCases(projectRoot);
     const auto* definition = findCaseDefinition(definitions, caseName);
@@ -655,10 +845,20 @@ int runWorkerMode(
 
     BenchmarkCaseResult result;
     try {
-        result = runBenchmarkCase(*definition, warmup, iterations, projectRoot, outputDir);
+        result = runBenchmarkCase(
+            *definition,
+            warmup,
+            iterations,
+            projectRoot,
+            outputDir,
+            pipelineMode,
+            ocrOuterMode,
+            ocrShadowWindow);
     } catch (const std::exception& e) {
         result.definition = *definition;
         result.warmupIterations = warmup;
+        result.pipelineMode = pipelineMode;
+        result.ocrOuterMode = ocrOuterMode;
         result.status = "blocked";
         result.error = e.what();
     }
@@ -678,10 +878,15 @@ json runCaseInSubprocess(
     int warmup,
     int iterations,
     const std::string& projectRoot,
-    const std::string& outputDir)
+    const std::string& outputDir,
+    PipelineMode pipelineMode,
+    OcrOuterMode ocrOuterMode,
+    size_t ocrShadowWindow)
 {
     const fs::path workerJsonPath =
-        fs::path(outputDir) / (definition.name + "_worker_summary.json");
+        fs::path(outputDir) /
+        (definition.name + "_" + pipelineModeToString(pipelineMode) + "_" +
+         ocrOuterModeToString(ocrOuterMode) + "_worker_summary.json");
     if (!workerJsonPath.parent_path().empty()) {
         fs::create_directories(workerJsonPath.parent_path());
     }
@@ -695,6 +900,9 @@ json runCaseInSubprocess(
         "--warmup", std::to_string(warmup),
         "--output-dir", outputDir,
         "--project-root", projectRoot,
+        "--pipeline-mode", pipelineModeToString(pipelineMode),
+        "--ocr-outer-mode", ocrOuterModeToString(ocrOuterMode),
+        "--ocr-shadow-window", std::to_string(std::max<size_t>(1, ocrShadowWindow)),
     };
 
     pid_t pid = fork();
@@ -711,6 +919,8 @@ json runCaseInSubprocess(
     if (pid < 0) {
         return json{
             {"name", definition.name},
+            {"pipeline_mode", pipelineModeToString(pipelineMode)},
+            {"ocr_outer_mode", ocrOuterModeToString(ocrOuterMode)},
             {"description", definition.description},
             {"input_path", definition.inputPath},
             {"warmup_iterations", warmup},
@@ -737,9 +947,11 @@ json runCaseInSubprocess(
         error << "worker_failed_without_status";
     }
 
-    return json{
-        {"name", definition.name},
-        {"description", definition.description},
+        return json{
+            {"name", definition.name},
+            {"pipeline_mode", pipelineModeToString(pipelineMode)},
+            {"ocr_outer_mode", ocrOuterModeToString(ocrOuterMode)},
+            {"description", definition.description},
         {"input_path", definition.inputPath},
         {"warmup_iterations", warmup},
         {"measured_iterations", 0},
@@ -757,8 +969,65 @@ void printUsage(const char* program) {
     std::cout << "  --case <name>      Run only the named case (repeatable)\n";
     std::cout << "  --json-out <path>  Write JSON summary to file\n";
     std::cout << "  --output-dir <p>   Benchmark scratch output dir (default: ./output-benchmark)\n";
+    std::cout << "  --pipeline-mode <m> serial|page_pipeline_mvp|both (default: both)\n";
+    std::cout << "  --ocr-outer-mode <m> immediate_per_task|shadow_windowed_collect (default: immediate_per_task)\n";
+    std::cout << "  --ocr-shadow-window <n> Max OCR inflight window for shadow mode (default: 8)\n";
     std::cout << "  --project-root <p> Override project root (internal/debug)\n";
     std::cout << "  --help             Show this help\n";
+}
+
+json buildModeComparison(
+    const BenchmarkCaseDefinition& definition,
+    const json& serialSummary,
+    const json& pipelineSummary)
+{
+    if (serialSummary.value("status", "ok") != "ok" ||
+        pipelineSummary.value("status", "ok") != "ok") {
+        return json{
+            {"name", definition.name},
+            {"status", "blocked"},
+            {"serial_status", serialSummary.value("status", "blocked")},
+            {"page_pipeline_mvp_status", pipelineSummary.value("status", "blocked")},
+        };
+    }
+
+    const double serialWallMs =
+        serialSummary.at("document_total").value("mean_ms", 0.0);
+    const double pipelineWallMs =
+        pipelineSummary.at("document_total").value("mean_ms", 0.0);
+    const double serialPagesPerSec =
+        serialSummary.at("mean_stats").value("pages_per_sec", 0.0);
+    const double pipelinePagesPerSec =
+        pipelineSummary.at("mean_stats").value("pages_per_sec", 0.0);
+    const double serialOverlap =
+        serialSummary.at("mean_stage_breakdown").value("pipeline_overlap_factor", 0.0);
+    const double pipelineOverlap =
+        pipelineSummary.at("mean_stage_breakdown").value("pipeline_overlap_factor", 0.0);
+    const bool markdownHashMatch =
+        serialSummary.value("markdown_sha256", "") ==
+        pipelineSummary.value("markdown_sha256", "");
+    const bool contentListHashMatch =
+        serialSummary.value("content_list_sha256", "") ==
+        pipelineSummary.value("content_list_sha256", "");
+
+    return json{
+        {"name", definition.name},
+        {"ocr_outer_mode", serialSummary.value("ocr_outer_mode", "immediate_per_task")},
+        {"status", "ok"},
+        {"serial_wall_time_ms", serialWallMs},
+        {"page_pipeline_mvp_wall_time_ms", pipelineWallMs},
+        {"wall_time_delta_ms", pipelineWallMs - serialWallMs},
+        {"wall_time_speedup_ratio", pipelineWallMs > 0.0 ? serialWallMs / pipelineWallMs : 0.0},
+        {"serial_pages_per_sec", serialPagesPerSec},
+        {"page_pipeline_mvp_pages_per_sec", pipelinePagesPerSec},
+        {"pages_per_sec_delta", pipelinePagesPerSec - serialPagesPerSec},
+        {"serial_overlap_factor", serialOverlap},
+        {"page_pipeline_mvp_overlap_factor", pipelineOverlap},
+        {"overlap_factor_delta", pipelineOverlap - serialOverlap},
+        {"markdown_hash_match", markdownHashMatch},
+        {"content_list_hash_match", contentListHashMatch},
+        {"hash_mismatch", !(markdownHashMatch && contentListHashMatch)},
+    };
 }
 
 } // namespace
@@ -771,6 +1040,9 @@ int main(int argc, char** argv) {
     std::string outputDir = (fs::path(projectRoot) / "output-benchmark").string();
     std::string workerCaseName;
     std::string workerJsonPath;
+    std::string pipelineModeArg = "both";
+    std::string ocrOuterModeArg = "immediate_per_task";
+    size_t ocrShadowWindow = 8;
     std::set<std::string> requestedCases;
 
     for (int i = 1; i < argc; ++i) {
@@ -785,6 +1057,13 @@ int main(int argc, char** argv) {
             jsonOutPath = argv[++i];
         } else if (arg == "--output-dir" && i + 1 < argc) {
             outputDir = argv[++i];
+        } else if (arg == "--pipeline-mode" && i + 1 < argc) {
+            pipelineModeArg = argv[++i];
+        } else if (arg == "--ocr-outer-mode" && i + 1 < argc) {
+            ocrOuterModeArg = argv[++i];
+        } else if (arg == "--ocr-shadow-window" && i + 1 < argc) {
+            const long long parsed = std::strtoll(argv[++i], nullptr, 10);
+            ocrShadowWindow = parsed > 0 ? static_cast<size_t>(parsed) : 1;
         } else if (arg == "--project-root" && i + 1 < argc) {
             projectRoot = argv[++i];
         } else if (arg == "--worker-case" && i + 1 < argc) {
@@ -803,13 +1082,41 @@ int main(int argc, char** argv) {
 
     spdlog::set_level(spdlog::level::err);
 
+    std::vector<PipelineMode> requestedModes;
+    OcrOuterMode ocrOuterMode = OcrOuterMode::ImmediatePerTask;
+    if (!parseOcrOuterMode(ocrOuterModeArg, ocrOuterMode)) {
+        std::cerr << "Invalid --ocr-outer-mode: " << ocrOuterModeArg << "\n";
+        return 1;
+    }
+    if (pipelineModeArg == "both") {
+        requestedModes = {
+            PipelineMode::Serial,
+            PipelineMode::PagePipelineMvp,
+        };
+    } else {
+        PipelineMode parsedMode = PipelineMode::Serial;
+        if (!parsePipelineMode(pipelineModeArg, parsedMode)) {
+            std::cerr << "Invalid --pipeline-mode: " << pipelineModeArg << "\n";
+            return 1;
+        }
+        requestedModes = {parsedMode};
+    }
+
     if (!workerCaseName.empty()) {
         if (workerJsonPath.empty()) {
             std::cerr << "--worker-json is required with --worker-case\n";
             return 1;
         }
         return runWorkerMode(
-            workerCaseName, warmup, iterations, projectRoot, outputDir, workerJsonPath);
+            workerCaseName,
+            warmup,
+            iterations,
+            projectRoot,
+            outputDir,
+            workerJsonPath,
+            requestedModes.front(),
+            ocrOuterMode,
+            ocrShadowWindow);
     }
 
     std::vector<BenchmarkCaseDefinition> selectedCases;
@@ -830,7 +1137,14 @@ int main(int argc, char** argv) {
             std::chrono::system_clock::now().time_since_epoch()).count();
     root["iterations"] = iterations;
     root["warmup"] = warmup;
+    root["pipeline_modes"] = json::array();
+    for (PipelineMode mode : requestedModes) {
+        root["pipeline_modes"].push_back(pipelineModeToString(mode));
+    }
+    root["ocr_outer_mode"] = ocrOuterModeToString(ocrOuterMode);
+    root["ocr_shadow_window"] = ocrShadowWindow;
     root["cases"] = json::array();
+    root["comparisons"] = json::array();
     const std::string binaryPath = fs::absolute(argv[0]).string();
 
     for (const auto& definition : selectedCases) {
@@ -840,10 +1154,45 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        const json summary = runCaseInSubprocess(
-            binaryPath, definition, warmup, iterations, projectRoot, outputDir);
-        std::cout << buildHumanSummary(summary) << "\n";
-        root["cases"].push_back(summary);
+        json caseEntry{
+            {"name", definition.name},
+            {"description", definition.description},
+            {"input_path", definition.inputPath},
+            {"runs", json::array()},
+        };
+
+        json serialSummary;
+        json pipelineSummary;
+        bool haveSerial = false;
+        bool havePagePipeline = false;
+        for (PipelineMode mode : requestedModes) {
+            const json summary = runCaseInSubprocess(
+                binaryPath,
+                definition,
+                warmup,
+                iterations,
+                projectRoot,
+                outputDir,
+                mode,
+                ocrOuterMode,
+                ocrShadowWindow);
+            std::cout << buildHumanSummary(summary) << "\n";
+            caseEntry["runs"].push_back(summary);
+            if (mode == PipelineMode::Serial) {
+                serialSummary = summary;
+                haveSerial = true;
+            } else if (mode == PipelineMode::PagePipelineMvp) {
+                pipelineSummary = summary;
+                havePagePipeline = true;
+            }
+        }
+
+        if (haveSerial && havePagePipeline) {
+            const json comparison = buildModeComparison(definition, serialSummary, pipelineSummary);
+            caseEntry["ab_compare"] = comparison;
+            root["comparisons"].push_back(comparison);
+        }
+        root["cases"].push_back(caseEntry);
     }
 
     if (!jsonOutPath.empty()) {

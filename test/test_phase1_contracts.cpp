@@ -137,6 +137,65 @@ TEST(Phase1CorrectnessContracts, ocr_result_must_match_task_id) {
     EXPECT_EQ(DocPipelineTestAccess::ocrOnCrop(pipeline, crop, 12), "future-task");
 }
 
+TEST(Phase1CorrectnessContracts, shadow_windowed_collect_buffers_out_of_order_results) {
+    struct FakeOcrBackend {
+        std::vector<int64_t> pushed;
+        std::deque<std::tuple<int64_t, bool, std::vector<ocr::PipelineOCRResult>>> queue;
+
+        bool push(const cv::Mat&, int64_t id) {
+            pushed.push_back(id);
+            if (pushed.size() == 2 && queue.empty()) {
+                queue.push_back({pushed[1], true, {makeOcrResult("second")}}); // out-of-order
+                queue.push_back({pushed[0], true, {makeOcrResult("first")}});
+            }
+            return true;
+        }
+
+        bool fetch(std::vector<ocr::PipelineOCRResult>& out, int64_t& id, bool& success) {
+            if (queue.empty()) {
+                return false;
+            }
+            auto item = std::move(queue.front());
+            queue.pop_front();
+            id = std::get<0>(item);
+            success = std::get<1>(item);
+            out = std::move(std::get<2>(item));
+            return true;
+        }
+    } fake;
+
+    auto cfg = makeContractConfig();
+    cfg.stages.enableOcr = true;
+    cfg.runtime.ocrOuterMode = OcrOuterMode::ShadowWindowedCollect;
+    cfg.runtime.ocrShadowWindow = 8;
+    DocPipeline pipeline(cfg);
+    DocPipelineTestAccess::setOcrHooks(
+        pipeline,
+        [&fake](const cv::Mat& img, int64_t id) { return fake.push(img, id); },
+        [&fake](std::vector<ocr::PipelineOCRResult>& out, int64_t& id, bool& success) {
+            return fake.fetch(out, id, success);
+        });
+
+    cv::Mat page(96, 96, CV_8UC3, cv::Scalar::all(255));
+    PageResult result = DocPipelineTestAccess::processPageWithLayoutBoxes(
+        pipeline,
+        page,
+        {
+            makeBox(LayoutCategory::TEXT, 4, 4, 36, 20),
+            makeBox(LayoutCategory::TEXT, 4, 28, 36, 44),
+        },
+        0);
+
+    ASSERT_EQ(fake.pushed.size(), 2u);
+    ASSERT_EQ(result.elements.size(), 2u);
+    EXPECT_EQ(result.elements[0].text, "first");
+    EXPECT_EQ(result.elements[1].text, "second");
+    EXPECT_DOUBLE_EQ(result.stats.ocrBufferedOutOfOrderCount, 1.0);
+    EXPECT_DOUBLE_EQ(result.stats.ocrBufferedResultHitCount, 1.0);
+    EXPECT_DOUBLE_EQ(result.stats.ocrInflightPeak, 2.0);
+    EXPECT_DOUBLE_EQ(result.stats.ocrSubmitCount, 2.0);
+}
+
 TEST(Phase1CorrectnessContracts, content_element_page_index_propagation) {
     struct EchoOcrBackend {
         std::deque<int64_t> pending;
@@ -354,6 +413,51 @@ TEST(Phase1CorrectnessContracts, ocr_empty_table_preserves_structure) {
     EXPECT_EQ(countSubstr(elems[0].html, "<td></td>"), 4u);
 }
 
+TEST(Phase1CorrectnessContracts, deferred_table_finalize_preserves_hook_output_and_fanout) {
+    auto cfg = makeContractConfig();
+    cfg.stages.enableWiredTable = true;
+    cfg.stages.enableOcr = false;
+    DocPipeline pipeline(cfg);
+
+    DocPipelineTestAccess::setTableHooks(
+        pipeline,
+        [](const cv::Mat&) {
+            TableResult result;
+            result.type = TableType::WIRED;
+            result.supported = true;
+            result.cells = {makeCell(0, 0, 1, 1, "HookCell")};
+            return result;
+        },
+        [](const std::vector<TableCell>& cells) {
+            return std::string("<table><tr><td>") + cells.front().content + "</td></tr></table>";
+        });
+
+    cv::Mat page(80, 120, CV_8UC3, cv::Scalar::all(255));
+    const std::vector<LayoutBox> tableBoxes = {
+        makeBox(LayoutCategory::TABLE, 5, 5, 70, 60),
+        makeBox(LayoutCategory::TABLE, 5, 5, 70, 60),
+    };
+
+    const auto expected = DocPipelineTestAccess::runTableRecognition(
+        pipeline, page, tableBoxes, 9);
+    const auto pageResult = DocPipelineTestAccess::processPageWithLayoutBoxes(
+        pipeline, page, tableBoxes, 9);
+
+    ASSERT_EQ(pageResult.tableResults.size(), 1u);
+    ASSERT_EQ(pageResult.tableResults[0].cells.size(), 1u);
+    EXPECT_EQ(pageResult.tableResults[0].cells[0].content, "HookCell");
+
+    ASSERT_EQ(pageResult.elements.size(), expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(pageResult.elements[i].type, expected[i].type);
+        EXPECT_EQ(pageResult.elements[i].pageIndex, expected[i].pageIndex);
+        EXPECT_EQ(pageResult.elements[i].html, expected[i].html);
+        EXPECT_EQ(pageResult.elements[i].text, expected[i].text);
+        EXPECT_EQ(pageResult.elements[i].skipped, expected[i].skipped);
+    }
+    EXPECT_GE(pageResult.stats.finalizeCpuTimeMs, pageResult.stats.tableFinalizeTimeMs);
+}
+
 TEST(Phase1CorrectnessContracts, table_html_rejects_hole) {
     TableRecognizer recognizer(TableRecognizerConfig{});
     const std::vector<TableCell> cells = {
@@ -455,6 +559,7 @@ TEST(Phase1CorrectnessContracts, request_local_overrides_do_not_mutate_shared_pi
     overrides.startPageId = 0;
     overrides.endPageId = 0;
     overrides.maxPages = 1;
+    overrides.pipelineMode = PipelineMode::PagePipelineMvp;
     overrides.enableWiredTable = false;
     overrides.enableFormula = false;
     overrides.enableMarkdownOutput = false;
@@ -463,11 +568,13 @@ TEST(Phase1CorrectnessContracts, request_local_overrides_do_not_mutate_shared_pi
         reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), overrides);
     ASSERT_EQ(result.processedPages, 1);
     ASSERT_EQ(result.totalPages, 1);
+    EXPECT_EQ(result.stats.pipelineMode, "page_pipeline_mvp");
 
     const PipelineConfig after = pipeline.config();
     EXPECT_EQ(after.runtime.outputDir, before.runtime.outputDir);
     EXPECT_EQ(after.runtime.saveImages, before.runtime.saveImages);
     EXPECT_EQ(after.runtime.saveVisualization, before.runtime.saveVisualization);
+    EXPECT_EQ(after.runtime.pipelineMode, before.runtime.pipelineMode);
     EXPECT_EQ(after.runtime.startPageId, before.runtime.startPageId);
     EXPECT_EQ(after.runtime.endPageId, before.runtime.endPageId);
     EXPECT_EQ(after.runtime.maxPages, before.runtime.maxPages);

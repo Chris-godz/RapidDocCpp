@@ -72,6 +72,12 @@ int main(int argc, char* argv[]) {
         cfg.pipelineConfig.runtime.saveImages = false;
         cfg.pipelineConfig.runtime.saveVisualization = false;
         cfg.pipelineConfig.runtime.outputDir = std::string(PROJECT_ROOT_DIR) + "/test/fixtures/http_server_output/result";
+        const std::string pipelineMode =
+            parseStringFlag(argc, argv, "--pipeline-mode", "");
+        if (!pipelineMode.empty() &&
+            !rapid_doc::parsePipelineMode(pipelineMode, cfg.pipelineConfig.runtime.pipelineMode)) {
+            throw std::runtime_error("invalid --pipeline-mode");
+        }
 
         rapid_doc::DocServer server(cfg);
         server.run();
