@@ -59,6 +59,7 @@ struct CliArgs {
     bool detail = false;
     std::string detailPath;
     bool verbose = false;
+    bool showHelp = false;
 };
 
 enum LongOnlyOpt {
@@ -98,7 +99,10 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
             case OPT_DETAIL: args.detail = true; break;
             case OPT_DETAIL_FILE: args.detailPath = optarg; break;
             case 'v': args.verbose = true; break;
-            case 'h': printUsage(argv[0]); return false;
+            case 'h':
+                printUsage(argv[0]);
+                args.showHelp = true;
+                return false;
             default:  printUsage(argv[0]); return false;
         }
     }
@@ -115,7 +119,7 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
 int main(int argc, char* argv[]) {
     CliArgs args;
     if (!parseArgs(argc, argv, args)) {
-        return 1;
+        return args.showHelp ? 0 : 1;
     }
 
     // Set log level
