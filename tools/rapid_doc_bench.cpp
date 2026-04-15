@@ -43,6 +43,7 @@ struct BenchmarkCaseDefinition {
 struct BenchmarkIterationResult {
     double totalTimeMs = 0.0;
     int processedPages = 0;
+    std::string formulaCapability;
     DocumentStageStats stageStats;
     std::vector<double> pageTimesMs;
 };
@@ -124,6 +125,7 @@ BenchmarkIterationResult runOnce(DocPipeline& pipeline, const std::string& input
     BenchmarkIterationResult iteration;
     iteration.totalTimeMs = result.totalTimeMs;
     iteration.processedPages = result.processedPages;
+    iteration.formulaCapability = result.formulaCapability;
     iteration.stageStats = result.stats;
     iteration.pageTimesMs.reserve(result.pages.size());
     for (const auto& page : result.pages) {
@@ -248,10 +250,16 @@ json buildJsonSummary(const BenchmarkCaseResult& result) {
         rawIterations.push_back(json{
             {"total_time_ms", iteration.totalTimeMs},
             {"processed_pages", iteration.processedPages},
+            {"formula_capability", iteration.formulaCapability},
             {"page_times_ms", iteration.pageTimesMs},
             {"stage_stats", stageStatsToJson(iteration.stageStats)},
         });
     }
+
+    const std::string formulaCapability = result.iterations.empty()
+        ? "unknown"
+        : result.iterations.front().formulaCapability;
+    const bool formulaParityBlocked = formulaCapability == "fallback_image_only";
 
     return json{
         {"name", result.definition.name},
@@ -260,6 +268,9 @@ json buildJsonSummary(const BenchmarkCaseResult& result) {
         {"warmup_iterations", result.warmupIterations},
         {"measured_iterations", result.iterations.size()},
         {"status", "ok"},
+        {"formula_capability", formulaCapability},
+        {"same_module_parity_status", formulaParityBlocked ? "not_proven" : "not_applicable"},
+        {"same_module_parity_blocker", formulaParityBlocked ? "formula_parity" : ""},
         {"document_total", summaryToJson(summarizeSamples(documentTotals))},
         {"page_total", summaryToJson(summarizeSamples(allPageTotals))},
         {"mean_stage_breakdown", stageStatsToJson(meanStageStats(result.iterations))},
@@ -281,6 +292,11 @@ std::string buildHumanSummary(const json& summary) {
     const auto& documentTotal = summary.at("document_total");
     const auto& pageTotal = summary.at("page_total");
     const auto& stageBreakdown = summary.at("mean_stage_breakdown");
+    out << "  formula_capability: " << summary.value("formula_capability", "unknown") << "\n";
+    if (summary.value("same_module_parity_status", "") == "not_proven") {
+        out << "  same_module_parity_status: not_proven, blocker="
+            << summary.value("same_module_parity_blocker", "") << "\n";
+    }
     out << "  warmup: " << summary.value("warmup_iterations", 0)
         << ", measured_iterations: " << summary.value("measured_iterations", 0) << "\n";
     out << "  document_total: mean=" << formatMs(documentTotal.value("mean_ms", 0.0))

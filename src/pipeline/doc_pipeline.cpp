@@ -316,6 +316,9 @@ DocumentResult DocPipeline::processPdfInternal(
     auto startTime = std::chrono::steady_clock::now();
 
     DocumentResult result;
+    result.formulaCapability = ctx.stages.enableFormula
+        ? "fallback_image_only"
+        : "disabled";
 
     if (!initialized_) {
         LOG_ERROR("Pipeline not initialized");
@@ -404,6 +407,9 @@ DocumentResult DocPipeline::processPdfFromMemoryInternal(
     LOG_INFO("Processing PDF from memory: {} bytes", size);
 
     DocumentResult result;
+    result.formulaCapability = ctx.stages.enableFormula
+        ? "fallback_image_only"
+        : "disabled";
     if (!initialized_) {
         LOG_ERROR("Pipeline not initialized");
         return result;
@@ -478,6 +484,9 @@ DocumentResult DocPipeline::processImageDocumentInternal(
     auto startTime = std::chrono::steady_clock::now();
 
     DocumentResult result;
+    result.formulaCapability = ctx.stages.enableFormula
+        ? "fallback_image_only"
+        : "disabled";
     if (!initialized_) {
         LOG_ERROR("Pipeline not initialized");
         return result;

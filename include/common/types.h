@@ -234,6 +234,7 @@ struct DocumentResult {
     std::vector<PageResult> pages;
     std::string markdown;                   // Generated Markdown
     std::string contentListJson;            // Structured JSON output
+    std::string formulaCapability = "fallback_image_only"; // Current formula path capability
     double totalTimeMs = 0.0;
     int totalPages = 0;
     int processedPages = 0;
