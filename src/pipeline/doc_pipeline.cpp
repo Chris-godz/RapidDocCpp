@@ -13,8 +13,12 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <future>
 #include <iomanip>
 #include <sstream>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -28,6 +32,25 @@ void finalizeDocumentStats(DocumentResult& result) {
     result.stats = accumulateDocumentStageStats(result.pages);
     result.stats.pdfRenderTimeMs = pdfRenderTimeMs;
     result.stats.outputGenTimeMs = outputGenTimeMs;
+}
+
+void finalizeFormulaCounters(DocumentResult& result) {
+    result.formulaElementCount = 0;
+    result.formulaLatexCount = 0;
+    result.formulaImageFallbackCount = 0;
+    for (const auto& page : result.pages) {
+        for (const auto& elem : page.elements) {
+            if (elem.type != ContentElement::Type::EQUATION) {
+                continue;
+            }
+            ++result.formulaElementCount;
+            if (!elem.text.empty()) {
+                ++result.formulaLatexCount;
+            } else if (!elem.imagePath.empty()) {
+                ++result.formulaImageFallbackCount;
+            }
+        }
+    }
 }
 
 struct OcrWorkItem {
@@ -63,6 +86,223 @@ struct TableNpuResult {
     TableRecognizer::NpuStageResult npuStage;
     std::vector<ocr::PipelineOCRResult> ocrBoxes;
 };
+
+bool envFlagEnabled(const char* key) {
+    const char* raw = std::getenv(key);
+    if (raw == nullptr) {
+        return false;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+int envIntOrDefault(const char* key, int defaultValue) {
+    const char* raw = std::getenv(key);
+    if (raw == nullptr || *raw == '\0') {
+        return defaultValue;
+    }
+    try {
+        return std::stoi(raw);
+    } catch (...) {
+        return defaultValue;
+    }
+}
+
+cv::Rect clampRectToPage(const LayoutBox& box, int pageWidth, int pageHeight) {
+    return box.toRect() & cv::Rect(0, 0, pageWidth, pageHeight);
+}
+
+double intersectionArea(const cv::Rect& a, const cv::Rect& b) {
+    const cv::Rect inter = a & b;
+    if (inter.width <= 0 || inter.height <= 0) {
+        return 0.0;
+    }
+    return static_cast<double>(inter.width) * static_cast<double>(inter.height);
+}
+
+bool centerInside(const cv::Rect& outer, const cv::Rect& inner) {
+    const cv::Point center(
+        outer.x + (outer.width / 2),
+        outer.y + (outer.height / 2));
+    return center.x >= inner.x &&
+           center.x < (inner.x + inner.width) &&
+           center.y >= inner.y &&
+           center.y < (inner.y + inner.height);
+}
+
+cv::Rect inflateRectClamped(
+    const cv::Rect& rect,
+    int inflateX,
+    int inflateY,
+    int pageWidth,
+    int pageHeight)
+{
+    const int x0 = std::max(0, rect.x - inflateX);
+    const int y0 = std::max(0, rect.y - inflateY);
+    const int x1 = std::min(pageWidth, rect.x + rect.width + inflateX);
+    const int y1 = std::min(pageHeight, rect.y + rect.height + inflateY);
+    return cv::Rect(x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0));
+}
+
+std::string normalizeAsciiNoSpaceLower(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (unsigned char c : text) {
+        if (std::isspace(c)) {
+            continue;
+        }
+        out.push_back(static_cast<char>(std::tolower(c)));
+    }
+    return out;
+}
+
+bool looksLikeFigureContextText(const std::string& text) {
+    const std::string normalized = normalizeAsciiNoSpaceLower(text);
+    if (normalized.empty()) {
+        return false;
+    }
+    return normalized.find("fig") != std::string::npos ||
+           normalized.find("figure") != std::string::npos;
+}
+
+std::vector<bool> buildContainedEquationMask(
+    const std::vector<LayoutBox>& equationBoxes,
+    int pageWidth,
+    int pageHeight)
+{
+    std::vector<bool> contained(equationBoxes.size(), false);
+    std::vector<cv::Rect> rois(equationBoxes.size());
+    std::vector<double> areas(equationBoxes.size(), 0.0);
+    for (size_t i = 0; i < equationBoxes.size(); ++i) {
+        rois[i] = clampRectToPage(equationBoxes[i], pageWidth, pageHeight);
+        if (rois[i].width > 0 && rois[i].height > 0) {
+            areas[i] = static_cast<double>(rois[i].width) * static_cast<double>(rois[i].height);
+        }
+    }
+
+    constexpr double kContainerAreaRatio = 2.5;
+    constexpr double kContainmentOverlap = 0.92;
+    for (size_t i = 0; i < equationBoxes.size(); ++i) {
+        if (areas[i] <= 0.0) {
+            continue;
+        }
+        for (size_t j = 0; j < equationBoxes.size(); ++j) {
+            if (i == j || areas[j] <= 0.0) {
+                continue;
+            }
+            if (areas[j] <= areas[i] * kContainerAreaRatio) {
+                continue;
+            }
+            const double overlap = intersectionArea(rois[i], rois[j]) / areas[i];
+            if (overlap >= kContainmentOverlap) {
+                contained[i] = true;
+                break;
+            }
+        }
+    }
+    return contained;
+}
+
+bool shouldFilterFormulaCandidateConservative(
+    const LayoutBox& candidate,
+    const std::vector<cv::Rect>& figureRois,
+    const std::vector<cv::Rect>& figureCaptionRois,
+    const std::vector<cv::Rect>& figureTextContextRois,
+    int pageWidth,
+    int pageHeight)
+{
+    if (pageWidth <= 0 || pageHeight <= 0) {
+        return false;
+    }
+
+    const cv::Rect candidateRoi = clampRectToPage(candidate, pageWidth, pageHeight);
+    if (candidateRoi.width <= 0 || candidateRoi.height <= 0) {
+        return false;
+    }
+
+    const double pageArea = static_cast<double>(pageWidth) * static_cast<double>(pageHeight);
+    const double candidateArea =
+        static_cast<double>(candidateRoi.width) * static_cast<double>(candidateRoi.height);
+    if (candidateArea <= 0.0 || pageArea <= 0.0) {
+        return false;
+    }
+
+    const double areaRatio = candidateArea / pageArea;
+    const double widthRatio = static_cast<double>(candidateRoi.width) / pageWidth;
+    const double heightRatio = static_cast<double>(candidateRoi.height) / pageHeight;
+
+    // Conservative gate: only touch small candidates that are likely panel markers.
+    constexpr double kSmallAreaRatio = 0.0035;
+    constexpr double kSmallWidthRatio = 0.14;
+    constexpr double kSmallHeightRatio = 0.10;
+    const bool isSmallCandidate =
+        areaRatio <= kSmallAreaRatio &&
+        widthRatio <= kSmallWidthRatio &&
+        heightRatio <= kSmallHeightRatio;
+    if (!isSmallCandidate) {
+        return false;
+    }
+
+    double maxFigureOverlap = 0.0;
+    bool centerInFigure = false;
+    for (const auto& figureRoi : figureRois) {
+        if (figureRoi.width <= 0 || figureRoi.height <= 0) {
+            continue;
+        }
+        const double overlap = intersectionArea(candidateRoi, figureRoi) / candidateArea;
+        maxFigureOverlap = std::max(maxFigureOverlap, overlap);
+        if (!centerInFigure && centerInside(candidateRoi, figureRoi)) {
+            centerInFigure = true;
+        }
+    }
+
+    double maxCaptionOverlap = 0.0;
+    for (const auto& captionRoi : figureCaptionRois) {
+        if (captionRoi.width <= 0 || captionRoi.height <= 0) {
+            continue;
+        }
+        const double overlap = intersectionArea(candidateRoi, captionRoi) / candidateArea;
+        maxCaptionOverlap = std::max(maxCaptionOverlap, overlap);
+    }
+
+    constexpr double kTinyAreaRatio = 0.0018;
+    constexpr double kFigureOverlapGate = 0.55;
+    constexpr double kCaptionOverlapGate = 0.65;
+    if (areaRatio <= kTinyAreaRatio && centerInFigure) {
+        return true;
+    }
+    if (maxFigureOverlap >= kFigureOverlapGate) {
+        return true;
+    }
+    if (maxCaptionOverlap >= kCaptionOverlapGate) {
+        return true;
+    }
+
+    for (const auto& textContextRoi : figureTextContextRois) {
+        if (textContextRoi.width <= 0 || textContextRoi.height <= 0) {
+            continue;
+        }
+        const double overlap = intersectionArea(candidateRoi, textContextRoi) / candidateArea;
+        if (overlap >= 0.50) {
+            return true;
+        }
+        const cv::Rect expanded = inflateRectClamped(
+            textContextRoi,
+            24,
+            12,
+            pageWidth,
+            pageHeight);
+        if (expanded.width > 0 && expanded.height > 0 &&
+            centerInside(candidateRoi, expanded) &&
+            areaRatio <= kSmallAreaRatio) {
+            return true;
+        }
+    }
+    return false;
+}
 
 std::vector<OcrWorkItem> buildOcrWorkItems(
     const cv::Mat& image,
@@ -201,6 +441,59 @@ bool DocPipeline::initialize() {
         LOG_INFO("Layout detector initialized");
     }
 
+    if (config_.stages.enableFormula) {
+        FormulaRecognizerConfig formulaCfg;
+        formulaCfg.onnxModelPath = config_.models.formulaOnnxModel;
+        formulaCfg.inputSize = 384;
+        formulaCfg.enableCpuMemArena = false;
+        formulaCfg.maxBatchSize = 8;
+
+        const char* ortProfileRaw = std::getenv("RAPIDDOC_FORMULA_ORT_PROFILE");
+        const std::string ortProfile = ortProfileRaw == nullptr ? "" : std::string(ortProfileRaw);
+        if (ortProfile == "constrained") {
+            formulaCfg.sequentialExecution = true;
+            formulaCfg.intraOpThreads = 1;
+            formulaCfg.interOpThreads = 1;
+        } else if (ortProfile == "sequential") {
+            formulaCfg.sequentialExecution = true;
+        }
+
+        const int intraThreads = envIntOrDefault("RAPIDDOC_FORMULA_ORT_INTRA_THREADS", -1);
+        const int interThreads = envIntOrDefault("RAPIDDOC_FORMULA_ORT_INTER_THREADS", -1);
+        if (intraThreads > 0) {
+            formulaCfg.intraOpThreads = intraThreads;
+        }
+        if (interThreads > 0) {
+            formulaCfg.interOpThreads = interThreads;
+        }
+
+        formulaRecognizer_ = std::make_unique<FormulaRecognizer>(formulaCfg);
+        if (!formulaRecognizer_->initialize()) {
+            LOG_ERROR("Failed to initialize formula recognizer");
+            return false;
+        }
+        formulaDualSessionEnabled_ = envFlagEnabled("RAPIDDOC_FORMULA_DUAL_SESSION");
+        formulaDualSessionMinCrops_ = static_cast<size_t>(std::max(
+            1,
+            envIntOrDefault("RAPIDDOC_FORMULA_DUAL_SESSION_MIN_CROPS", 96)));
+        formulaRecognizerSecondary_.reset();
+        if (formulaDualSessionEnabled_) {
+            formulaRecognizerSecondary_ = std::make_unique<FormulaRecognizer>(formulaCfg);
+            if (!formulaRecognizerSecondary_->initialize()) {
+                LOG_WARN("Secondary formula recognizer init failed, fallback to single session");
+                formulaRecognizerSecondary_.reset();
+                formulaDualSessionEnabled_ = false;
+            }
+        }
+
+        LOG_INFO("Formula recognizer initialized (ONNX Runtime)");
+        LOG_INFO(
+            "Formula infer profile: ort_profile='{}', dual_session={}, dual_session_min_crops={}",
+            ortProfile.empty() ? "default" : ortProfile,
+            formulaDualSessionEnabled_ ? "enabled" : "disabled",
+            formulaDualSessionMinCrops_);
+    }
+
     // Initialize Table recognizer (wired tables only)
     if (config_.stages.enableWiredTable) {
         TableRecognizerConfig tableCfg;
@@ -219,8 +512,9 @@ bool DocPipeline::initialize() {
     if (config_.stages.enableOcr) {
         ocr::OCRPipelineConfig ocrCfg;
 
-        // Detection model paths — use only 640 model to conserve NPU memory
-        ocrCfg.detectorConfig.model640Path = config_.models.ocrModelDir + "/det_v5_640.dxnn";
+        // Detection model path aligned with Python README lane model naming.
+        // Keep single-det in C++ pipeline core to avoid reintroducing legacy outer schedulers.
+        ocrCfg.detectorConfig.model640Path = config_.models.ocrModelDir + "/det_v5_640_640.dxnn";
         ocrCfg.detectorConfig.model960Path = "";
         ocrCfg.detectorConfig.sizeThreshold = 99999;
 
@@ -283,6 +577,19 @@ DocPipeline::ExecutionContext DocPipeline::makeExecutionContext(
     return ctx;
 }
 
+std::string DocPipeline::resolveFormulaCapability(const ExecutionContext& ctx) const {
+    if (!ctx.stages.enableFormula) {
+        return "disabled";
+    }
+    if (formulaRecognizeHook_) {
+        return "latex_onnxruntime";
+    }
+    if (formulaRecognizer_ && formulaRecognizer_->isInitialized()) {
+        return "latex_onnxruntime";
+    }
+    return "disabled";
+}
+
 void DocPipeline::resetOcrTransientStateForRun() {
     std::lock_guard<std::mutex> lock(ocrStateMutex_);
     bufferedOcrResults_.clear();
@@ -315,9 +622,7 @@ DocumentResult DocPipeline::processPdfInternal(
     auto startTime = std::chrono::steady_clock::now();
 
     DocumentResult result;
-    result.formulaCapability = ctx.stages.enableFormula
-        ? "fallback_image_only"
-        : "disabled";
+    result.formulaCapability = resolveFormulaCapability(ctx);
 
     if (!initialized_) {
         LOG_ERROR("Pipeline not initialized");
@@ -351,15 +656,24 @@ DocumentResult DocPipeline::processPdfInternal(
 
     LOG_INFO("Rendered {} pages from PDF", pageImages.size());
 
+    const bool deferFormulaStage = ctx.stages.enableFormula;
     for (size_t i = 0; i < pageImages.size(); i++) {
         reportProgress("Processing", static_cast<int>(i + 1), static_cast<int>(pageImages.size()));
 
-        PageResult pageResult = processPage(pageImages[i], ctx);
+        PageResult pageResult = processPage(
+            pageImages[i],
+            ctx,
+            deferFormulaStage,
+            deferFormulaStage && ctx.stages.enableReadingOrder);
         result.pages.push_back(std::move(pageResult));
         result.processedPages++;
     }
+    if (deferFormulaStage) {
+        runDocumentFormulaStage(pageImages, result, ctx);
+    }
 
     finalizeDocumentStats(result);
+    finalizeFormulaCounters(result);
 
     reportProgress("Output", 0, 1);
     auto outputStart = std::chrono::steady_clock::now();
@@ -406,9 +720,7 @@ DocumentResult DocPipeline::processPdfFromMemoryInternal(
     LOG_INFO("Processing PDF from memory: {} bytes", size);
 
     DocumentResult result;
-    result.formulaCapability = ctx.stages.enableFormula
-        ? "fallback_image_only"
-        : "disabled";
+    result.formulaCapability = resolveFormulaCapability(ctx);
     if (!initialized_) {
         LOG_ERROR("Pipeline not initialized");
         return result;
@@ -434,13 +746,22 @@ DocumentResult DocPipeline::processPdfFromMemoryInternal(
         std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
     result.totalPages = static_cast<int>(pageImages.size());
 
+    const bool deferFormulaStage = ctx.stages.enableFormula;
     for (size_t i = 0; i < pageImages.size(); i++) {
-        PageResult pageResult = processPage(pageImages[i], ctx);
+        PageResult pageResult = processPage(
+            pageImages[i],
+            ctx,
+            deferFormulaStage,
+            deferFormulaStage && ctx.stages.enableReadingOrder);
         result.pages.push_back(std::move(pageResult));
         result.processedPages++;
     }
+    if (deferFormulaStage) {
+        runDocumentFormulaStage(pageImages, result, ctx);
+    }
 
     finalizeDocumentStats(result);
+    finalizeFormulaCounters(result);
 
     auto outputStart = std::chrono::steady_clock::now();
     if (ctx.stages.enableMarkdownOutput) {
@@ -483,9 +804,7 @@ DocumentResult DocPipeline::processImageDocumentInternal(
     auto startTime = std::chrono::steady_clock::now();
 
     DocumentResult result;
-    result.formulaCapability = ctx.stages.enableFormula
-        ? "fallback_image_only"
-        : "disabled";
+    result.formulaCapability = resolveFormulaCapability(ctx);
     if (!initialized_) {
         LOG_ERROR("Pipeline not initialized");
         return result;
@@ -505,6 +824,7 @@ DocumentResult DocPipeline::processImageDocumentInternal(
     result.processedPages = 1;
 
     finalizeDocumentStats(result);
+    finalizeFormulaCounters(result);
 
     auto outputStart = std::chrono::steady_clock::now();
     if (ctx.stages.enableMarkdownOutput) {
@@ -543,6 +863,15 @@ PageResult DocPipeline::processPage(const PageImage& pageImage) {
 }
 
 PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionContext& ctx) {
+    return processPage(pageImage, ctx, false, false);
+}
+
+PageResult DocPipeline::processPage(
+    const PageImage& pageImage,
+    const ExecutionContext& ctx,
+    bool deferFormulaStage,
+    bool deferReadingOrderStage)
+{
     auto startTime = std::chrono::steady_clock::now();
     PageResult result;
     result.pageIndex = pageImage.pageIndex;
@@ -550,8 +879,6 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     result.pageHeight = pageImage.image.rows;
 
     const cv::Mat& image = pageImage.image;
-    int pageWidth = image.cols;
-    int pageHeight = image.rows;
 
     std::vector<LayoutBox> textBoxes;
     std::vector<LayoutBox> tableBoxes;
@@ -870,10 +1197,15 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     result.stats.figureTimeMs =
         std::chrono::duration<double, std::milli>(figureEnd - figureStart).count();
 
-    // Formula: save crop as image (CPU fallback path, no NPU call).
-    if (ctx.stages.enableFormula) {
+    // Formula: LaTeX-first recognition with per-element image fallback.
+    if (ctx.stages.enableFormula && !deferFormulaStage) {
         auto formulaStart = std::chrono::steady_clock::now();
-        saveFormulaImages(image, equationBoxes, pageImage.pageIndex, result.elements, ctx);
+        auto formulaElements =
+            runFormulaRecognition(image, equationBoxes, pageImage.pageIndex, ctx);
+        result.elements.insert(
+            result.elements.end(),
+            formulaElements.begin(),
+            formulaElements.end());
         auto formulaEnd = std::chrono::steady_clock::now();
         result.stats.formulaTimeMs =
             std::chrono::duration<double, std::milli>(formulaEnd - formulaStart).count();
@@ -887,29 +1219,8 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
         std::chrono::duration<double, std::milli>(unsupportedEnd - unsupportedStart).count();
     result.elements.insert(result.elements.end(), skipElements.begin(), skipElements.end());
 
-    // Step 3: Reading order sort (CPU)
-    if (ctx.stages.enableReadingOrder && !result.elements.empty()) {
-        auto orderStart = std::chrono::steady_clock::now();
-        // Extract layout boxes from elements for sorting
-        std::vector<LayoutBox> sortBoxes;
-        for (const auto& elem : result.elements) {
-            sortBoxes.push_back(elem.layoutBox);
-        }
-
-        auto sortedIndices = xycutPlusSort(sortBoxes, pageWidth, pageHeight);
-        
-        // Reorder elements
-        std::vector<ContentElement> sortedElements;
-        sortedElements.reserve(result.elements.size());
-        for (int i = 0; i < static_cast<int>(sortedIndices.size()); i++) {
-            int idx = sortedIndices[i];
-            result.elements[idx].readingOrder = i;
-            sortedElements.push_back(result.elements[idx]);
-        }
-        result.elements = std::move(sortedElements);
-        auto orderEnd = std::chrono::steady_clock::now();
-        result.stats.readingOrderTimeMs =
-            std::chrono::duration<double, std::milli>(orderEnd - orderStart).count();
+    if (!deferReadingOrderStage) {
+        runReadingOrderStage(result, ctx);
     }
 
     auto cpuEnd = std::chrono::steady_clock::now();
@@ -921,6 +1232,346 @@ PageResult DocPipeline::processPage(const PageImage& pageImage, const ExecutionC
     result.totalTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
 
     return result;
+}
+
+void DocPipeline::runReadingOrderStage(PageResult& result, const ExecutionContext& ctx) {
+    if (!ctx.stages.enableReadingOrder || result.elements.empty()) {
+        return;
+    }
+
+    auto orderStart = std::chrono::steady_clock::now();
+    std::vector<LayoutBox> sortBoxes;
+    sortBoxes.reserve(result.elements.size());
+    for (const auto& elem : result.elements) {
+        sortBoxes.push_back(elem.layoutBox);
+    }
+
+    const auto sortedIndices = xycutPlusSort(sortBoxes, result.pageWidth, result.pageHeight);
+    std::vector<ContentElement> sortedElements;
+    sortedElements.reserve(result.elements.size());
+    for (int i = 0; i < static_cast<int>(sortedIndices.size()); i++) {
+        const int idx = sortedIndices[i];
+        result.elements[idx].readingOrder = i;
+        sortedElements.push_back(result.elements[idx]);
+    }
+    result.elements = std::move(sortedElements);
+
+    auto orderEnd = std::chrono::steady_clock::now();
+    const double orderMs =
+        std::chrono::duration<double, std::milli>(orderEnd - orderStart).count();
+    result.stats.readingOrderTimeMs += orderMs;
+    result.stats.cpuOnlyTimeMs += orderMs;
+    result.totalTimeMs += orderMs;
+}
+
+void DocPipeline::runDocumentFormulaStage(
+    const std::vector<PageImage>& pageImages,
+    DocumentResult& result,
+    const ExecutionContext& ctx)
+{
+    if (!ctx.stages.enableFormula || pageImages.empty() || result.pages.empty()) {
+        for (auto& page : result.pages) {
+            runReadingOrderStage(page, ctx);
+        }
+        return;
+    }
+
+    struct FormulaCropRef {
+        size_t pageResultIndex = 0;
+        size_t equationIndex = 0;
+    };
+
+    const size_t pageCount = std::min(pageImages.size(), result.pages.size());
+    std::vector<std::vector<LayoutBox>> equationBoxesByPage(pageCount);
+    std::vector<std::vector<cv::Rect>> equationRoisByPage(pageCount);
+    std::vector<std::vector<std::string>> latexByPage(pageCount);
+    std::vector<int> equationCountByPage(pageCount, 0);
+
+    std::vector<cv::Mat> allCrops;
+    std::vector<FormulaCropRef> cropRefs;
+
+    result.formulaTimingBill = FormulaTimingBill{};
+    const auto formulaStart = std::chrono::steady_clock::now();
+
+    const auto regionCollectStart = std::chrono::steady_clock::now();
+    int totalEquationRawCount = 0;
+    int totalEquationDropped = 0;
+    int totalEquationDroppedContained = 0;
+    int totalEquationDroppedFigureContext = 0;
+    for (size_t pageIdx = 0; pageIdx < pageCount; ++pageIdx) {
+        const auto& pageResult = result.pages[pageIdx];
+        const auto& pageImage = pageImages[pageIdx].image;
+        const int pageWidth = pageImage.cols;
+        const int pageHeight = pageImage.rows;
+
+        const auto rawEquationBoxes = pageResult.layoutResult.getEquationBoxes();
+        totalEquationRawCount += static_cast<int>(rawEquationBoxes.size());
+
+        std::vector<cv::Rect> figureRois;
+        std::vector<cv::Rect> figureCaptionRois;
+        std::vector<cv::Rect> figureTextContextRois;
+        figureRois.reserve(pageResult.layoutResult.boxes.size());
+        figureCaptionRois.reserve(pageResult.layoutResult.boxes.size());
+        figureTextContextRois.reserve(pageResult.elements.size());
+        for (const auto& box : pageResult.layoutResult.boxes) {
+            if (box.category == LayoutCategory::FIGURE) {
+                const cv::Rect roi = clampRectToPage(box, pageWidth, pageHeight);
+                if (roi.width > 0 && roi.height > 0) {
+                    figureRois.push_back(roi);
+                }
+            } else if (box.category == LayoutCategory::FIGURE_CAPTION) {
+                const cv::Rect roi = clampRectToPage(box, pageWidth, pageHeight);
+                if (roi.width > 0 && roi.height > 0) {
+                    figureCaptionRois.push_back(roi);
+                }
+            }
+        }
+        for (const auto& elem : pageResult.elements) {
+            if (elem.type != ContentElement::Type::TEXT &&
+                elem.type != ContentElement::Type::TITLE) {
+                continue;
+            }
+            if (!looksLikeFigureContextText(elem.text)) {
+                continue;
+            }
+            const cv::Rect roi = clampRectToPage(elem.layoutBox, pageWidth, pageHeight);
+            if (roi.width > 0 && roi.height > 0) {
+                figureTextContextRois.push_back(roi);
+            }
+        }
+
+        const auto containedMask = buildContainedEquationMask(
+            rawEquationBoxes,
+            pageWidth,
+            pageHeight);
+
+        std::vector<LayoutBox> filteredEquationBoxes;
+        filteredEquationBoxes.reserve(rawEquationBoxes.size());
+        int droppedOnPage = 0;
+        int droppedContainedOnPage = 0;
+        int droppedFigureCtxOnPage = 0;
+        for (size_t equationIdx = 0; equationIdx < rawEquationBoxes.size(); ++equationIdx) {
+            const auto& equationBox = rawEquationBoxes[equationIdx];
+            if (equationIdx < containedMask.size() && containedMask[equationIdx]) {
+                ++droppedOnPage;
+                ++droppedContainedOnPage;
+                continue;
+            }
+            if (shouldFilterFormulaCandidateConservative(
+                    equationBox,
+                    figureRois,
+                    figureCaptionRois,
+                    figureTextContextRois,
+                    pageWidth,
+                    pageHeight)) {
+                ++droppedOnPage;
+                ++droppedFigureCtxOnPage;
+                continue;
+            }
+            filteredEquationBoxes.push_back(equationBox);
+        }
+        totalEquationDropped += droppedOnPage;
+        totalEquationDroppedContained += droppedContainedOnPage;
+        totalEquationDroppedFigureContext += droppedFigureCtxOnPage;
+
+        equationBoxesByPage[pageIdx] = std::move(filteredEquationBoxes);
+        equationRoisByPage[pageIdx].resize(equationBoxesByPage[pageIdx].size());
+        latexByPage[pageIdx].resize(equationBoxesByPage[pageIdx].size());
+        equationCountByPage[pageIdx] = static_cast<int>(equationBoxesByPage[pageIdx].size());
+    }
+    const auto regionCollectEnd = std::chrono::steady_clock::now();
+    result.formulaTimingBill.regionCollectMs =
+        std::chrono::duration<double, std::milli>(regionCollectEnd - regionCollectStart).count();
+    if (totalEquationDropped > 0) {
+        LOG_INFO(
+            "Formula pre-infer conservative gate dropped {}/{} candidates (contained={}, figure_context={})",
+            totalEquationDropped,
+            totalEquationRawCount,
+            totalEquationDroppedContained,
+            totalEquationDroppedFigureContext);
+    }
+
+    const auto cropPrepareStart = std::chrono::steady_clock::now();
+    for (size_t pageIdx = 0; pageIdx < pageCount; ++pageIdx) {
+        const auto& image = pageImages[pageIdx].image;
+        const auto& equationBoxes = equationBoxesByPage[pageIdx];
+        for (size_t equationIdx = 0; equationIdx < equationBoxes.size(); ++equationIdx) {
+            const auto& box = equationBoxes[equationIdx];
+            const cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
+            equationRoisByPage[pageIdx][equationIdx] = roi;
+            if (roi.width <= 0 || roi.height <= 0) {
+                continue;
+            }
+            allCrops.emplace_back(image(roi));
+            cropRefs.push_back(FormulaCropRef{
+                pageIdx,
+                equationIdx,
+            });
+        }
+    }
+    const auto cropPrepareEnd = std::chrono::steady_clock::now();
+    result.formulaTimingBill.cropPrepareMs =
+        std::chrono::duration<double, std::milli>(cropPrepareEnd - cropPrepareStart).count();
+    result.formulaTimingBill.cropCount = static_cast<int>(allCrops.size());
+
+    std::vector<std::string> latexes(allCrops.size());
+    FormulaRecognizer::BatchTiming batchTimingPrimary;
+    FormulaRecognizer::BatchTiming batchTimingSecondary;
+    double inferWallMs = 0.0;
+    if (!allCrops.empty()) {
+        const auto inferWallStart = std::chrono::steady_clock::now();
+        if (formulaRecognizeHook_) {
+            latexes = formulaRecognizeHook_(allCrops);
+            batchTimingPrimary.inferMs =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - inferWallStart).count();
+            batchTimingPrimary.totalMs = batchTimingPrimary.inferMs;
+            batchTimingPrimary.cropCount = static_cast<int>(allCrops.size());
+            batchTimingPrimary.batchCount = 1;
+        } else if (formulaRecognizer_ && formulaRecognizer_->isInitialized()) {
+            const bool useDualSession =
+                formulaDualSessionEnabled_ &&
+                formulaRecognizerSecondary_ &&
+                formulaRecognizerSecondary_->isInitialized() &&
+                allCrops.size() >= formulaDualSessionMinCrops_;
+            if (!useDualSession) {
+                latexes = formulaRecognizer_->recognizeBatch(allCrops, &batchTimingPrimary);
+            } else {
+                const size_t splitIndex = allCrops.size() / 2;
+                std::vector<cv::Mat> primaryCrops;
+                std::vector<cv::Mat> secondaryCrops;
+                primaryCrops.reserve(splitIndex);
+                secondaryCrops.reserve(allCrops.size() - splitIndex);
+                for (size_t i = 0; i < splitIndex; ++i) {
+                    primaryCrops.emplace_back(allCrops[i]);
+                }
+                for (size_t i = splitIndex; i < allCrops.size(); ++i) {
+                    secondaryCrops.emplace_back(allCrops[i]);
+                }
+
+                auto secondaryFuture = std::async(
+                    std::launch::async,
+                    [this, crops = std::move(secondaryCrops)]() mutable {
+                        FormulaRecognizer::BatchTiming timing;
+                        auto values = formulaRecognizerSecondary_->recognizeBatch(crops, &timing);
+                        return std::make_pair(std::move(values), timing);
+                    });
+
+                auto primaryLatex = formulaRecognizer_->recognizeBatch(
+                    primaryCrops,
+                    &batchTimingPrimary);
+                auto secondaryResult = secondaryFuture.get();
+                auto& secondaryLatex = secondaryResult.first;
+                batchTimingSecondary = secondaryResult.second;
+
+                latexes.assign(allCrops.size(), "");
+                for (size_t i = 0; i < primaryLatex.size() && i < splitIndex; ++i) {
+                    latexes[i] = primaryLatex[i];
+                }
+                for (size_t i = 0;
+                     i < secondaryLatex.size() && (splitIndex + i) < latexes.size();
+                     ++i) {
+                    latexes[splitIndex + i] = secondaryLatex[i];
+                }
+            }
+        }
+        inferWallMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - inferWallStart).count();
+    }
+    result.formulaTimingBill.cropPrepareMs +=
+        (batchTimingPrimary.preprocessMs + batchTimingSecondary.preprocessMs);
+    result.formulaTimingBill.inferMs = inferWallMs;
+    result.formulaTimingBill.decodeMs =
+        batchTimingPrimary.decodeMs + batchTimingSecondary.decodeMs;
+    result.formulaTimingBill.normalizeMs =
+        batchTimingPrimary.normalizeMs + batchTimingSecondary.normalizeMs;
+    result.formulaTimingBill.batchCount =
+        batchTimingPrimary.batchCount + batchTimingSecondary.batchCount;
+
+    const auto writebackStart = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < cropRefs.size(); ++i) {
+        const auto& ref = cropRefs[i];
+        if (ref.pageResultIndex >= latexByPage.size() ||
+            ref.equationIndex >= latexByPage[ref.pageResultIndex].size()) {
+            continue;
+        }
+        if (i < latexes.size()) {
+            latexByPage[ref.pageResultIndex][ref.equationIndex] = latexes[i];
+        }
+    }
+
+    for (size_t pageIdx = 0; pageIdx < pageCount; ++pageIdx) {
+        auto& pageResult = result.pages[pageIdx];
+        const auto& pageImage = pageImages[pageIdx];
+        const auto& image = pageImage.image;
+        const auto& equationBoxes = equationBoxesByPage[pageIdx];
+        const auto& rois = equationRoisByPage[pageIdx];
+        const auto& latexesForPage = latexByPage[pageIdx];
+
+        pageResult.elements.reserve(pageResult.elements.size() + equationBoxes.size());
+        for (size_t equationIdx = 0; equationIdx < equationBoxes.size(); ++equationIdx) {
+            const auto& box = equationBoxes[equationIdx];
+            const auto& roi = rois[equationIdx];
+            const bool validRoi = roi.width > 0 && roi.height > 0;
+
+            ContentElement elem;
+            elem.type = ContentElement::Type::EQUATION;
+            elem.layoutBox = box;
+            elem.pageIndex = pageResult.pageIndex;
+            elem.confidence = box.confidence;
+
+            const std::string latex =
+                (equationIdx < latexesForPage.size()) ? latexesForPage[equationIdx] : std::string();
+            if (!latex.empty()) {
+                elem.text = latex;
+                elem.skipped = false;
+            } else if (validRoi && ctx.runtime.saveImages) {
+                const std::string filename = "images/page" + std::to_string(pageResult.pageIndex) +
+                                             "_eq" + std::to_string(equationIdx) + ".png";
+                const std::string filepath = ctx.runtime.outputDir + "/" + filename;
+                std::filesystem::create_directories(
+                    std::filesystem::path(filepath).parent_path());
+                cv::imwrite(filepath, image(roi));
+                elem.imagePath = filename;
+                elem.skipped = false;
+            } else {
+                elem.skipped = true;
+            }
+            pageResult.elements.push_back(std::move(elem));
+        }
+    }
+    const auto writebackEnd = std::chrono::steady_clock::now();
+    result.formulaTimingBill.writebackMs =
+        std::chrono::duration<double, std::milli>(writebackEnd - writebackStart).count();
+
+    const auto formulaEnd = std::chrono::steady_clock::now();
+    result.formulaTimingBill.totalMs =
+        std::chrono::duration<double, std::milli>(formulaEnd - formulaStart).count();
+    const double formulaMs = result.formulaTimingBill.totalMs;
+
+    int totalEquationCount = 0;
+    for (int count : equationCountByPage) {
+        totalEquationCount += count;
+    }
+    if (totalEquationCount <= 0) {
+        totalEquationCount = 1;
+    }
+
+    for (size_t pageIdx = 0; pageIdx < pageCount; ++pageIdx) {
+        auto& pageResult = result.pages[pageIdx];
+        const double pageFormulaMs =
+            formulaMs * static_cast<double>(equationCountByPage[pageIdx]) /
+            static_cast<double>(totalEquationCount);
+        pageResult.stats.formulaTimeMs += pageFormulaMs;
+        pageResult.stats.cpuOnlyTimeMs += pageFormulaMs;
+        pageResult.totalTimeMs += pageFormulaMs;
+
+        runReadingOrderStage(pageResult, ctx);
+    }
+
+    for (size_t pageIdx = pageCount; pageIdx < result.pages.size(); ++pageIdx) {
+        runReadingOrderStage(result.pages[pageIdx], ctx);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1236,6 +1887,95 @@ ContentElement DocPipeline::makeTableFallbackElement(
     return elem;
 }
 
+std::vector<ContentElement> DocPipeline::runFormulaRecognition(
+    const cv::Mat& image,
+    const std::vector<LayoutBox>& equationBoxes,
+    int pageIndex)
+{
+    return runFormulaRecognition(
+        image, equationBoxes, pageIndex, makeExecutionContext(nullptr));
+}
+
+std::vector<ContentElement> DocPipeline::runFormulaRecognition(
+    const cv::Mat& image,
+    const std::vector<LayoutBox>& equationBoxes,
+    int pageIndex,
+    const ExecutionContext& ctx)
+{
+    std::vector<ContentElement> elements;
+    elements.reserve(equationBoxes.size());
+    if (equationBoxes.empty()) {
+        return elements;
+    }
+
+    std::vector<cv::Mat> crops;
+    std::vector<cv::Rect> rois;
+    std::vector<size_t> validIndices;
+    crops.reserve(equationBoxes.size());
+    rois.reserve(equationBoxes.size());
+    validIndices.reserve(equationBoxes.size());
+
+    for (size_t i = 0; i < equationBoxes.size(); ++i) {
+        const auto& box = equationBoxes[i];
+        cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
+        rois.push_back(roi);
+        if (roi.width <= 0 || roi.height <= 0) {
+            continue;
+        }
+        crops.emplace_back(image(roi));
+        validIndices.push_back(i);
+    }
+
+    std::vector<std::string> latexes(crops.size());
+    if (!crops.empty()) {
+        if (formulaRecognizeHook_) {
+            latexes = formulaRecognizeHook_(crops);
+        } else if (formulaRecognizer_ && formulaRecognizer_->isInitialized()) {
+            latexes = formulaRecognizer_->recognizeBatch(crops);
+        }
+    }
+
+    size_t latexCursor = 0;
+    for (size_t i = 0; i < equationBoxes.size(); ++i) {
+        const auto& box = equationBoxes[i];
+        ContentElement elem;
+        elem.type = ContentElement::Type::EQUATION;
+        elem.layoutBox = box;
+        elem.pageIndex = pageIndex;
+        elem.confidence = box.confidence;
+
+        const cv::Rect roi = rois[i];
+        const bool validRoi = roi.width > 0 && roi.height > 0;
+        std::string latex;
+        if (validRoi) {
+            if (latexCursor < latexes.size()) {
+                latex = latexes[latexCursor];
+            }
+            ++latexCursor;
+        }
+
+        if (!latex.empty()) {
+            elem.text = latex;
+            elem.skipped = false;
+        } else if (validRoi && ctx.runtime.saveImages) {
+            std::string filename = "images/page" + std::to_string(pageIndex) +
+                                   "_eq" + std::to_string(i) + ".png";
+            const std::string filepath = ctx.runtime.outputDir + "/" + filename;
+            std::filesystem::create_directories(
+                std::filesystem::path(filepath).parent_path());
+            cv::imwrite(filepath, image(roi));
+            elem.imagePath = filename;
+            elem.skipped = false;
+        } else {
+            elem.skipped = true;
+        }
+
+        elements.push_back(std::move(elem));
+    }
+
+    return elements;
+}
+
 std::vector<ContentElement> DocPipeline::handleUnsupportedElements(
     const std::vector<LayoutBox>& unsupportedBoxes,
     int pageIndex)
@@ -1324,8 +2064,7 @@ void DocPipeline::saveFormulaImages(
     std::vector<ContentElement>& elements,
     const ExecutionContext& ctx)
 {
-    // Python behavior: formula regions are saved as images, rendered as ![]()
-    // No LaTeX recognition (onnx model not available on NPU).
+    // Utility fallback path: persist equation crops as images.
     for (size_t i = 0; i < equationBoxes.size(); i++) {
         const auto& box = equationBoxes[i];
         cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);

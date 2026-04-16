@@ -12,8 +12,7 @@
  *   5. Reading Order (XY-Cut++ algorithm)
  *   6. Output Generation (Markdown + JSON content list)
  * 
- * Unsupported stages (Formula, Wireless Table, Table Classify) are
- * gracefully skipped with placeholders in the output.
+ * Unsupported stages (Wireless Table, Table Classify) are gracefully skipped.
  * 
  * The pipeline uses DXNN-OCR-cpp's OCRPipeline via Git submodule.
  */
@@ -22,6 +21,7 @@
 #include "common/config.h"
 #include "pdf/pdf_renderer.h"
 #include "layout/layout_detector.h"
+#include "formula/formula_recognizer.h"
 #include "table/table_recognizer.h"
 #include "reading_order/xycut.h"
 #include "output/markdown_writer.h"
@@ -160,12 +160,18 @@ private:
      */
     PageResult processPage(const PageImage& pageImage);
     PageResult processPage(const PageImage& pageImage, const ExecutionContext& ctx);
+    PageResult processPage(
+        const PageImage& pageImage,
+        const ExecutionContext& ctx,
+        bool deferFormulaStage,
+        bool deferReadingOrderStage);
 
     using OcrSubmitHook = std::function<bool(const cv::Mat&, int64_t)>;
     using OcrFetchHook = std::function<bool(
         std::vector<ocr::PipelineOCRResult>&, int64_t&, bool&)>;
     using TableRecognizeHook = std::function<TableResult(const cv::Mat&)>;
     using TableHtmlHook = std::function<std::string(const std::vector<TableCell>&)>;
+    using FormulaRecognizeHook = std::function<std::vector<std::string>(const std::vector<cv::Mat>&)>;
 
     /**
      * @brief Run OCR on text regions detected by layout
@@ -204,6 +210,18 @@ private:
     std::vector<ContentElement> handleUnsupportedElements(
         const std::vector<LayoutBox>& unsupportedBoxes,
         int pageIndex
+    );
+
+    std::vector<ContentElement> runFormulaRecognition(
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& equationBoxes,
+        int pageIndex
+    );
+    std::vector<ContentElement> runFormulaRecognition(
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& equationBoxes,
+        int pageIndex,
+        const ExecutionContext& ctx
     );
 
     /**
@@ -278,6 +296,12 @@ private:
         int pageIndex,
         const std::string& reason) const;
     static std::string tableFallbackMessage(const std::string& reason);
+    std::string resolveFormulaCapability(const ExecutionContext& ctx) const;
+    void runDocumentFormulaStage(
+        const std::vector<PageImage>& pageImages,
+        DocumentResult& result,
+        const ExecutionContext& ctx);
+    void runReadingOrderStage(PageResult& result, const ExecutionContext& ctx);
 
     ExecutionContext makeExecutionContext(const PipelineRunOverrides* overrides) const;
     void resetOcrTransientStateForRun();
@@ -296,15 +320,20 @@ private:
     // Pipeline components
     std::unique_ptr<PdfRenderer> pdfRenderer_;
     std::unique_ptr<LayoutDetector> layoutDetector_;
+    std::unique_ptr<FormulaRecognizer> formulaRecognizer_;
+    std::unique_ptr<FormulaRecognizer> formulaRecognizerSecondary_;
     std::unique_ptr<TableRecognizer> tableRecognizer_;
     std::unique_ptr<ocr::OCRPipeline> ocrPipeline_;
     std::mutex npuSerialMutex_;
     std::mutex* externalNpuSerialMutex_ = nullptr;
+    bool formulaDualSessionEnabled_ = false;
+    size_t formulaDualSessionMinCrops_ = 96;
 
     OcrSubmitHook ocrSubmitHook_;
     OcrFetchHook ocrFetchHook_;
     TableRecognizeHook tableRecognizeHook_;
     TableHtmlHook tableHtmlHook_;
+    FormulaRecognizeHook formulaRecognizeHook_;
 
     struct BufferedOcrResult {
         std::vector<ocr::PipelineOCRResult> results;
