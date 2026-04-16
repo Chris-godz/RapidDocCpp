@@ -9,16 +9,19 @@ namespace rapid_doc {
 PipelineConfig PipelineConfig::Default(const std::string& projectRoot) {
     PipelineConfig cfg;
 
-    // Layout models
-    cfg.models.layoutDxnnModel = projectRoot + "/engine/model_files/layout/pp_doclayout_l_part1.dxnn";
-    cfg.models.layoutOnnxSubModel = projectRoot + "/engine/model_files/layout/pp_doclayout_l_part2.onnx";
+    // Layout models (align with Python README lane DXNN/ONNX cache)
+    cfg.models.layoutDxnnModel = projectRoot + "/.download_cache/dxnn_models/pp_doclayout_l_part1.dxnn";
+    cfg.models.layoutOnnxSubModel = projectRoot + "/.download_cache/onnx_models/pp_doclayout_l_part2.onnx";
 
-    // Table models (wired only)
-    cfg.models.tableUnetDxnnModel = projectRoot + "/engine/model_files/table/unet.dxnn";
+    // Table models (wired only; align with Python README lane DXNN cache)
+    cfg.models.tableUnetDxnnModel = projectRoot + "/.download_cache/dxnn_models/unet.dxnn";
 
-    // OCR models (managed by DXNN-OCR-cpp)
-    cfg.models.ocrModelDir = projectRoot + "/3rd-party/DXNN-OCR-cpp/engine/model_files/server";
+    // OCR models (align with Python README lane DXNN cache)
+    cfg.models.ocrModelDir = projectRoot + "/.download_cache/dxnn_models";
     cfg.models.ocrDictPath = projectRoot + "/3rd-party/DXNN-OCR-cpp/engine/model_files/ppocrv5_dict.txt";
+
+    // Formula model (same README lane as Python demo_offline.py --finegrained)
+    cfg.models.formulaOnnxModel = projectRoot + "/.download_cache/onnx_models/pp_formulanet_plus_m.onnx";
 
     // Layout input size for pp_doclayout_l model
     cfg.runtime.layoutInputSize = 640;
@@ -49,6 +52,12 @@ std::string PipelineConfig::validate() const {
             return "OCR dictionary not found: " + models.ocrDictPath;
     }
 
+    // Formula model check
+    if (stages.enableFormula) {
+        if (!fs::exists(models.formulaOnnxModel))
+            return "Formula ONNX model not found: " + models.formulaOnnxModel;
+    }
+
     return "";  // Valid
 }
 
@@ -63,7 +72,7 @@ void PipelineConfig::show() const {
     LOG_INFO("  Wired Table:      {}", stages.enableWiredTable ? "ON" : "OFF");
     LOG_INFO("  Reading Order:    {}", stages.enableReadingOrder ? "ON" : "OFF");
     LOG_INFO("  Markdown Output:  {}", stages.enableMarkdownOutput ? "ON" : "OFF");
-    LOG_INFO("  Formula Fallback: {}", stages.enableFormula ? "ON" : "OFF");
+    LOG_INFO("  Formula:          {}", stages.enableFormula ? "ON" : "OFF");
     LOG_INFO("  Wireless Table:   {}", stages.enableWirelessTable ? "ON" : "OFF");
     LOG_INFO("  Table Classify:   {}", stages.enableTableClassify ? "ON" : "OFF");
     LOG_INFO("Models:");
@@ -71,6 +80,7 @@ void PipelineConfig::show() const {
     LOG_INFO("  Layout ONNX post: {}", models.layoutOnnxSubModel);
     LOG_INFO("  Table UNET:       {}", models.tableUnetDxnnModel);
     LOG_INFO("  OCR model dir:    {}", models.ocrModelDir);
+    LOG_INFO("  Formula ONNX:     {}", models.formulaOnnxModel);
     LOG_INFO("Runtime:");
     LOG_INFO("  PDF DPI:          {}", runtime.pdfDpi);
     LOG_INFO("  Max pages:        {}", runtime.maxPages);

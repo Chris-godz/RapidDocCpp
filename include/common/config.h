@@ -28,13 +28,15 @@ struct ModelPaths {
 
     // Character dictionary (used by OCR recognition)
     std::string ocrDictPath;           // ppocrv5_dict.txt
+
+    // Formula recognition (ONNX Runtime)
+    std::string formulaOnnxModel;      // pp_formulanet_plus_m.onnx
 };
 
 /**
  * @brief Pipeline stage enable/disable switches
  * 
  * NOTE: Wireless table and table classification remain unsupported.
- * Formula regions are exposed as image fallbacks rather than LaTeX output.
  */
 struct PipelineStages {
     bool enablePdfRender = true;        // PDF → page images
@@ -44,7 +46,7 @@ struct PipelineStages {
     bool enableReadingOrder = true;     // XY-Cut reading order sort
     bool enableMarkdownOutput = true;   // Generate Markdown output
 
-    bool enableFormula = true;          // Formula/equation image fallback
+    bool enableFormula = true;          // Formula/equation LaTeX recognition
     bool enableWirelessTable = false;   // Wireless table recognition (SLANet)
     bool enableTableClassify = false;   // Table type classification
 };
