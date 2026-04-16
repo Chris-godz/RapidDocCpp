@@ -161,7 +161,7 @@ struct ContentElement {
         TITLE,
         IMAGE,
         TABLE,
-        EQUATION,         // Placeholder — NPU unsupported
+        EQUATION,         // LaTeX-first with image fallback when recognition fails
         CODE,
         LIST,
         HEADER,
@@ -214,6 +214,21 @@ struct DocumentStageStats : public PageStageStats {
 };
 
 /**
+ * @brief Formula stage timing breakdown for one processed document
+ */
+struct FormulaTimingBill {
+    double regionCollectMs = 0.0;
+    double cropPrepareMs = 0.0;
+    double inferMs = 0.0;
+    double decodeMs = 0.0;
+    double normalizeMs = 0.0;
+    double writebackMs = 0.0;
+    double totalMs = 0.0;
+    int cropCount = 0;
+    int batchCount = 0;
+};
+
+/**
  * @brief Complete result for a single page
  */
 struct PageResult {
@@ -234,12 +249,17 @@ struct DocumentResult {
     std::vector<PageResult> pages;
     std::string markdown;                   // Generated Markdown
     std::string contentListJson;            // Structured JSON output
-    std::string formulaCapability = "fallback_image_only"; // Current formula path capability
+    std::string formulaTraceJson;           // Optional sidecar trace for formula stage debugging
+    std::string formulaCapability = "disabled";
+    int formulaElementCount = 0;
+    int formulaLatexCount = 0;
+    int formulaImageFallbackCount = 0;
     double totalTimeMs = 0.0;
     int totalPages = 0;
     int processedPages = 0;
     int skippedElements = 0;                // Elements skipped due to NPU limitations
     DocumentStageStats stats;
+    FormulaTimingBill formulaTimingBill;
 };
 
 } // namespace rapid_doc

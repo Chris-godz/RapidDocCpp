@@ -9,6 +9,7 @@
 #include "pipeline/doc_pipeline.h"
 #include "common/logger.h"
 #include "common/perf_utils.h"
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <chrono>
 #include <thread>
@@ -17,10 +18,12 @@
 #include <cstdlib>
 #include <future>
 #include <iomanip>
+#include <numeric>
 #include <sstream>
 #include <utility>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 
 namespace rapid_doc {
 
@@ -109,6 +112,16 @@ int envIntOrDefault(const char* key, int defaultValue) {
     } catch (...) {
         return defaultValue;
     }
+}
+
+json layoutBoxTraceJson(const LayoutBox& box) {
+    return json{
+        {"bbox", {box.x0, box.y0, box.x1, box.y1}},
+        {"category", layoutCategoryToString(box.category)},
+        {"category_id", box.clsId},
+        {"label", box.label},
+        {"confidence", box.confidence},
+    };
 }
 
 cv::Rect clampRectToPage(const LayoutBox& box, int pageWidth, int pageHeight) {
@@ -1269,6 +1282,13 @@ void DocPipeline::runDocumentFormulaStage(
     DocumentResult& result,
     const ExecutionContext& ctx)
 {
+    const bool formulaTraceEnabled = envFlagEnabled("RAPIDDOC_FORMULA_TRACE");
+    const bool filterContainedEnabled = envFlagEnabled("RAPIDDOC_FORMULA_FILTER_CONTAINED");
+    const bool filterFigureContextEnabled =
+        envFlagEnabled("RAPIDDOC_FORMULA_FILTER_FIGURE_CONTEXT");
+    if (!formulaTraceEnabled) {
+        result.formulaTraceJson.clear();
+    }
     if (!ctx.stages.enableFormula || pageImages.empty() || result.pages.empty()) {
         for (auto& page : result.pages) {
             runReadingOrderStage(page, ctx);
@@ -1292,6 +1312,17 @@ void DocPipeline::runDocumentFormulaStage(
 
     result.formulaTimingBill = FormulaTimingBill{};
     const auto formulaStart = std::chrono::steady_clock::now();
+    json formulaTrace;
+    if (formulaTraceEnabled) {
+        formulaTrace = json{
+            {"raw_candidates", json::array()},
+            {"filtered_candidates", json::array()},
+            {"crop_mappings", json::array()},
+            {"crop_outputs", json::array()},
+            {"timing_bill", json::object()},
+            {"summary", json::object()},
+        };
+    }
 
     const auto regionCollectStart = std::chrono::steady_clock::now();
     int totalEquationRawCount = 0;
@@ -1306,44 +1337,57 @@ void DocPipeline::runDocumentFormulaStage(
 
         const auto rawEquationBoxes = pageResult.layoutResult.getEquationBoxes();
         totalEquationRawCount += static_cast<int>(rawEquationBoxes.size());
+        if (formulaTraceEnabled) {
+            for (size_t equationIdx = 0; equationIdx < rawEquationBoxes.size(); ++equationIdx) {
+                json candidate = layoutBoxTraceJson(rawEquationBoxes[equationIdx]);
+                candidate["page"] = pageResult.pageIndex;
+                candidate["raw_candidate_index"] = static_cast<int>(equationIdx);
+                formulaTrace["raw_candidates"].push_back(std::move(candidate));
+            }
+        }
 
         std::vector<cv::Rect> figureRois;
         std::vector<cv::Rect> figureCaptionRois;
         std::vector<cv::Rect> figureTextContextRois;
-        figureRois.reserve(pageResult.layoutResult.boxes.size());
-        figureCaptionRois.reserve(pageResult.layoutResult.boxes.size());
-        figureTextContextRois.reserve(pageResult.elements.size());
-        for (const auto& box : pageResult.layoutResult.boxes) {
-            if (box.category == LayoutCategory::FIGURE) {
-                const cv::Rect roi = clampRectToPage(box, pageWidth, pageHeight);
-                if (roi.width > 0 && roi.height > 0) {
-                    figureRois.push_back(roi);
+        if (filterFigureContextEnabled) {
+            figureRois.reserve(pageResult.layoutResult.boxes.size());
+            figureCaptionRois.reserve(pageResult.layoutResult.boxes.size());
+            figureTextContextRois.reserve(pageResult.elements.size());
+            for (const auto& box : pageResult.layoutResult.boxes) {
+                if (box.category == LayoutCategory::FIGURE) {
+                    const cv::Rect roi = clampRectToPage(box, pageWidth, pageHeight);
+                    if (roi.width > 0 && roi.height > 0) {
+                        figureRois.push_back(roi);
+                    }
+                } else if (box.category == LayoutCategory::FIGURE_CAPTION) {
+                    const cv::Rect roi = clampRectToPage(box, pageWidth, pageHeight);
+                    if (roi.width > 0 && roi.height > 0) {
+                        figureCaptionRois.push_back(roi);
+                    }
                 }
-            } else if (box.category == LayoutCategory::FIGURE_CAPTION) {
-                const cv::Rect roi = clampRectToPage(box, pageWidth, pageHeight);
-                if (roi.width > 0 && roi.height > 0) {
-                    figureCaptionRois.push_back(roi);
+            }
+            for (const auto& elem : pageResult.elements) {
+                if (elem.type != ContentElement::Type::TEXT &&
+                    elem.type != ContentElement::Type::TITLE) {
+                    continue;
                 }
-            }
-        }
-        for (const auto& elem : pageResult.elements) {
-            if (elem.type != ContentElement::Type::TEXT &&
-                elem.type != ContentElement::Type::TITLE) {
-                continue;
-            }
-            if (!looksLikeFigureContextText(elem.text)) {
-                continue;
-            }
-            const cv::Rect roi = clampRectToPage(elem.layoutBox, pageWidth, pageHeight);
-            if (roi.width > 0 && roi.height > 0) {
-                figureTextContextRois.push_back(roi);
+                if (!looksLikeFigureContextText(elem.text)) {
+                    continue;
+                }
+                const cv::Rect roi = clampRectToPage(elem.layoutBox, pageWidth, pageHeight);
+                if (roi.width > 0 && roi.height > 0) {
+                    figureTextContextRois.push_back(roi);
+                }
             }
         }
 
-        const auto containedMask = buildContainedEquationMask(
-            rawEquationBoxes,
-            pageWidth,
-            pageHeight);
+        std::vector<bool> containedMask(rawEquationBoxes.size(), false);
+        if (filterContainedEnabled) {
+            containedMask = buildContainedEquationMask(
+                rawEquationBoxes,
+                pageWidth,
+                pageHeight);
+        }
 
         std::vector<LayoutBox> filteredEquationBoxes;
         filteredEquationBoxes.reserve(rawEquationBoxes.size());
@@ -1352,12 +1396,51 @@ void DocPipeline::runDocumentFormulaStage(
         int droppedFigureCtxOnPage = 0;
         for (size_t equationIdx = 0; equationIdx < rawEquationBoxes.size(); ++equationIdx) {
             const auto& equationBox = rawEquationBoxes[equationIdx];
-            if (equationIdx < containedMask.size() && containedMask[equationIdx]) {
+            if (formulaTraceEnabled) {
+                json candidate = layoutBoxTraceJson(equationBox);
+                candidate["page"] = pageResult.pageIndex;
+                candidate["raw_candidate_index"] = static_cast<int>(equationIdx);
+                candidate["filtered_candidate_index"] = -1;
+                candidate["kept"] = false;
+                candidate["drop_reason"] = "unknown";
+
+                if (filterContainedEnabled &&
+                    equationIdx < containedMask.size() &&
+                    containedMask[equationIdx]) {
+                    candidate["drop_reason"] = "contained";
+                    formulaTrace["filtered_candidates"].push_back(std::move(candidate));
+                    ++droppedOnPage;
+                    ++droppedContainedOnPage;
+                    continue;
+                }
+                if (filterFigureContextEnabled && shouldFilterFormulaCandidateConservative(
+                        equationBox,
+                        figureRois,
+                        figureCaptionRois,
+                        figureTextContextRois,
+                        pageWidth,
+                        pageHeight)) {
+                    candidate["drop_reason"] = "figure_context";
+                    formulaTrace["filtered_candidates"].push_back(std::move(candidate));
+                    ++droppedOnPage;
+                    ++droppedFigureCtxOnPage;
+                    continue;
+                }
+                candidate["kept"] = true;
+                candidate["drop_reason"] = "";
+                candidate["filtered_candidate_index"] = static_cast<int>(filteredEquationBoxes.size());
+                formulaTrace["filtered_candidates"].push_back(std::move(candidate));
+                filteredEquationBoxes.push_back(equationBox);
+                continue;
+            }
+            if (filterContainedEnabled &&
+                equationIdx < containedMask.size() &&
+                containedMask[equationIdx]) {
                 ++droppedOnPage;
                 ++droppedContainedOnPage;
                 continue;
             }
-            if (shouldFilterFormulaCandidateConservative(
+            if (filterFigureContextEnabled && shouldFilterFormulaCandidateConservative(
                     equationBox,
                     figureRois,
                     figureCaptionRois,
@@ -1382,7 +1465,7 @@ void DocPipeline::runDocumentFormulaStage(
     const auto regionCollectEnd = std::chrono::steady_clock::now();
     result.formulaTimingBill.regionCollectMs =
         std::chrono::duration<double, std::milli>(regionCollectEnd - regionCollectStart).count();
-    if (totalEquationDropped > 0) {
+    if ((filterContainedEnabled || filterFigureContextEnabled) && totalEquationDropped > 0) {
         LOG_INFO(
             "Formula pre-infer conservative gate dropped {}/{} candidates (contained={}, figure_context={})",
             totalEquationDropped,
@@ -1399,7 +1482,17 @@ void DocPipeline::runDocumentFormulaStage(
             const auto& box = equationBoxes[equationIdx];
             const cv::Rect roi = box.toRect() & cv::Rect(0, 0, image.cols, image.rows);
             equationRoisByPage[pageIdx][equationIdx] = roi;
-            if (roi.width <= 0 || roi.height <= 0) {
+            const bool validRoi = roi.width > 0 && roi.height > 0;
+            if (formulaTraceEnabled) {
+                json mapping = layoutBoxTraceJson(box);
+                mapping["page"] = result.pages[pageIdx].pageIndex;
+                mapping["filtered_candidate_index"] = static_cast<int>(equationIdx);
+                mapping["valid_roi"] = validRoi;
+                mapping["roi"] = {roi.x, roi.y, roi.x + roi.width, roi.y + roi.height};
+                mapping["crop_index"] = validRoi ? static_cast<int>(allCrops.size()) : -1;
+                formulaTrace["crop_mappings"].push_back(std::move(mapping));
+            }
+            if (!validRoi) {
                 continue;
             }
             allCrops.emplace_back(image(roi));
@@ -1495,8 +1588,20 @@ void DocPipeline::runDocumentFormulaStage(
             ref.equationIndex >= latexByPage[ref.pageResultIndex].size()) {
             continue;
         }
+        const std::string latex = i < latexes.size() ? latexes[i] : std::string();
         if (i < latexes.size()) {
-            latexByPage[ref.pageResultIndex][ref.equationIndex] = latexes[i];
+            latexByPage[ref.pageResultIndex][ref.equationIndex] = latex;
+        }
+        if (formulaTraceEnabled) {
+            const int pageIndex = static_cast<int>(result.pages[ref.pageResultIndex].pageIndex);
+            const LayoutBox& box = equationBoxesByPage[ref.pageResultIndex][ref.equationIndex];
+            json output = layoutBoxTraceJson(box);
+            output["crop_index"] = static_cast<int>(i);
+            output["page"] = pageIndex;
+            output["filtered_candidate_index"] = static_cast<int>(ref.equationIndex);
+            output["latex"] = latex;
+            output["has_latex"] = !latex.empty();
+            formulaTrace["crop_outputs"].push_back(std::move(output));
         }
     }
 
@@ -1548,6 +1653,34 @@ void DocPipeline::runDocumentFormulaStage(
     result.formulaTimingBill.totalMs =
         std::chrono::duration<double, std::milli>(formulaEnd - formulaStart).count();
     const double formulaMs = result.formulaTimingBill.totalMs;
+    if (formulaTraceEnabled) {
+        formulaTrace["timing_bill"] = json{
+            {"region_collect_ms", result.formulaTimingBill.regionCollectMs},
+            {"crop_prepare_ms", result.formulaTimingBill.cropPrepareMs},
+            {"infer_ms", result.formulaTimingBill.inferMs},
+            {"decode_ms", result.formulaTimingBill.decodeMs},
+            {"normalize_ms", result.formulaTimingBill.normalizeMs},
+            {"writeback_ms", result.formulaTimingBill.writebackMs},
+            {"total_ms", result.formulaTimingBill.totalMs},
+            {"crop_count", result.formulaTimingBill.cropCount},
+            {"batch_count", result.formulaTimingBill.batchCount},
+        };
+        formulaTrace["summary"] = json{
+            {"raw_candidate_count", totalEquationRawCount},
+            {"kept_candidate_count",
+             std::accumulate(equationCountByPage.begin(), equationCountByPage.end(), 0)},
+            {"crop_count", static_cast<int>(allCrops.size())},
+            {"dropped_candidate_count", totalEquationDropped},
+            {"dropped_contained_count", totalEquationDroppedContained},
+            {"dropped_figure_context_count", totalEquationDroppedFigureContext},
+            {"filter_contained_enabled", filterContainedEnabled},
+            {"filter_figure_context_enabled", filterFigureContextEnabled},
+            {"has_dual_session", formulaDualSessionEnabled_ &&
+                                     formulaRecognizerSecondary_ &&
+                                     formulaRecognizerSecondary_->isInitialized()},
+        };
+        result.formulaTraceJson = formulaTrace.dump(2);
+    }
 
     int totalEquationCount = 0;
     for (int count : equationCountByPage) {

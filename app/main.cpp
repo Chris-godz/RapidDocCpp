@@ -44,8 +44,9 @@ void printUsage(const char* programName) {
     std::cout << "  -v, --verbose           Verbose logging\n";
     std::cout << "  -h, --help              Show this help\n";
     std::cout << "\n";
-    std::cout << "Note: Formula recognition and wireless table recognition are not\n";
-    std::cout << "      supported on DEEPX NPU and will be skipped.\n";
+    std::cout << "Note: Formula recognition runs through ONNX Runtime when enabled.\n";
+    std::cout << "      Wireless table recognition is still unsupported on DEEPX NPU.\n";
+    std::cout << "      Set RAPIDDOC_FORMULA_TRACE=1 to emit formula trace sidecar JSON.\n";
 }
 
 struct CliArgs {
@@ -182,6 +183,13 @@ int main(int argc, char* argv[]) {
         std::ofstream jsonFile(jsonPath);
         jsonFile << result.contentListJson;
         LOG_INFO("Saved JSON: {}", jsonPath);
+    }
+
+    if (!result.formulaTraceJson.empty()) {
+        std::string tracePath = args.outputDir + "/" + baseName + "_formula_trace.json";
+        std::ofstream traceFile(tracePath);
+        traceFile << result.formulaTraceJson;
+        LOG_INFO("Saved Formula trace sidecar: {}", tracePath);
     }
 
     if (args.detail) {

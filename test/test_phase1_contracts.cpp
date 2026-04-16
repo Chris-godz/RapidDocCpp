@@ -5,10 +5,12 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <cstdlib>
 #include <string>
 #include <tuple>
 
 #include "common/config.h"
+#include "formula/formula_recognizer.h"
 #include "output/content_list.h"
 #include "output/markdown_writer.h"
 #include "pipeline/doc_pipeline.h"
@@ -416,6 +418,115 @@ TEST(Phase1CorrectnessContracts, save_images_false_does_not_emit_broken_paths) {
     ASSERT_EQ(parsed[0].size(), 2u);
     EXPECT_FALSE(parsed[0][0].contains("image_path"));
     EXPECT_FALSE(parsed[0][1].contains("image_path"));
+}
+
+TEST(Phase1CorrectnessContracts, formula_decode_normalize_fixture) {
+    const std::vector<std::string> idToToken = {
+        "<s>", "<pad>", "</s>", "x", "Ġ+", "Ġ1",
+    };
+    const std::vector<int64_t> tokenIds = {0, 3, 4, 5, 2, 1};
+    const std::string latex = FormulaRecognizer::decodeTokensForTest(tokenIds, idToToken);
+    EXPECT_EQ(latex, "x+ 1");
+}
+
+TEST(Phase1CorrectnessContracts, formula_elements_prefer_latex_over_image_fallback) {
+    auto cfg = makeContractConfig();
+    cfg.runtime.saveImages = true;
+    DocPipeline pipeline(cfg);
+
+    DocPipelineTestAccess::setFormulaHook(
+        pipeline,
+        [](const std::vector<cv::Mat>& crops) {
+            std::vector<std::string> outputs(crops.size());
+            for (size_t i = 0; i < crops.size(); ++i) {
+                outputs[i] = "\\frac{a}{b}";
+            }
+            return outputs;
+        });
+
+    cv::Mat page(120, 140, CV_8UC3, cv::Scalar::all(255));
+    auto elems = DocPipelineTestAccess::runFormulaRecognition(
+        pipeline,
+        page,
+        {makeBox(LayoutCategory::EQUATION, 20, 20, 100, 80)},
+        2);
+
+    ASSERT_EQ(elems.size(), 1u);
+    ASSERT_EQ(elems[0].type, ContentElement::Type::EQUATION);
+    EXPECT_EQ(elems[0].text, "\\frac{a}{b}");
+    EXPECT_TRUE(elems[0].imagePath.empty());
+
+    DocumentResult doc;
+    PageResult pageResult;
+    pageResult.pageIndex = 2;
+    pageResult.pageWidth = page.cols;
+    pageResult.pageHeight = page.rows;
+    pageResult.elements = elems;
+    doc.pages.push_back(pageResult);
+
+    MarkdownWriter mdWriter;
+    const std::string md = mdWriter.generate(doc);
+    EXPECT_NE(md.find("\\frac{a}{b}"), std::string::npos);
+    EXPECT_EQ(md.find("![]("), std::string::npos);
+}
+
+TEST(Phase1CorrectnessContracts, formula_trace_sidecar_contains_expected_fields) {
+    constexpr const char* kTraceEnv = "RAPIDDOC_FORMULA_TRACE";
+    const char* previousRaw = std::getenv(kTraceEnv);
+    const std::string previousValue = previousRaw == nullptr ? std::string() : std::string(previousRaw);
+    ASSERT_EQ(::setenv(kTraceEnv, "1", 1), 0);
+
+    auto cfg = makeContractConfig();
+    cfg.stages.enableFormula = true;
+    cfg.runtime.saveImages = false;
+    DocPipeline pipeline(cfg);
+
+    DocPipelineTestAccess::setFormulaHook(
+        pipeline,
+        [](const std::vector<cv::Mat>& crops) {
+            std::vector<std::string> outputs(crops.size());
+            for (size_t i = 0; i < crops.size(); ++i) {
+                outputs[i] = (i % 2 == 0) ? "\\alpha+\\beta" : "x^2";
+            }
+            return outputs;
+        });
+
+    PageImage pageImage;
+    pageImage.image = cv::Mat(120, 180, CV_8UC3, cv::Scalar::all(255));
+    pageImage.pageIndex = 0;
+
+    PageResult pageResult;
+    pageResult.pageIndex = 0;
+    pageResult.pageWidth = pageImage.image.cols;
+    pageResult.pageHeight = pageImage.image.rows;
+    pageResult.layoutResult.boxes = {
+        makeBox(LayoutCategory::EQUATION, 10, 12, 90, 40),
+        makeBox(LayoutCategory::INTERLINE_EQUATION, 20, 56, 120, 96),
+    };
+
+    DocumentResult doc;
+    doc.pages.push_back(pageResult);
+
+    DocPipelineTestAccess::runDocumentFormulaStage(pipeline, {pageImage}, doc);
+
+    ASSERT_FALSE(doc.formulaTraceJson.empty());
+    const json trace = json::parse(doc.formulaTraceJson);
+    ASSERT_TRUE(trace.contains("raw_candidates"));
+    ASSERT_TRUE(trace.contains("filtered_candidates"));
+    ASSERT_TRUE(trace.contains("crop_mappings"));
+    ASSERT_TRUE(trace.contains("crop_outputs"));
+    ASSERT_TRUE(trace.contains("timing_bill"));
+    EXPECT_EQ(trace.at("raw_candidates").size(), 2u);
+    EXPECT_EQ(trace.at("crop_mappings").size(), 2u);
+    EXPECT_EQ(trace.at("crop_outputs").size(), 2u);
+    EXPECT_EQ(trace.at("crop_outputs").at(0).value("latex", ""), "\\alpha+\\beta");
+    EXPECT_TRUE(trace.at("timing_bill").contains("infer_ms"));
+
+    if (previousRaw == nullptr) {
+        ::unsetenv(kTraceEnv);
+    } else {
+        ASSERT_EQ(::setenv(kTraceEnv, previousValue.c_str(), 1), 0);
+    }
 }
 
 TEST(Phase1CorrectnessContracts, request_local_overrides_do_not_mutate_shared_pipeline_config) {
