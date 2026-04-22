@@ -77,6 +77,14 @@ std::vector<LayoutBox> LayoutResult::getEquationBoxes() const {
     std::vector<LayoutBox> result;
     std::copy_if(boxes.begin(), boxes.end(), std::back_inserter(result),
         [](const LayoutBox& b) {
+            const bool isFormulaNumber =
+                b.label == "formula_number" ||
+                b.label == "interline_equation_number" ||
+                b.clsId == 19 ||
+                b.clsId == 9;
+            if (isFormulaNumber) {
+                return false;
+            }
             return b.category == LayoutCategory::EQUATION ||
                    b.category == LayoutCategory::INTERLINE_EQUATION;
         });

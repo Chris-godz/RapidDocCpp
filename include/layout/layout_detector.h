@@ -33,6 +33,7 @@ struct LayoutDetectorConfig {
     int inputSize = 640;            // Model input size (640 for pp_doclayout_l, 800 for pp_doclayout_plus_l)
     float confThreshold = 0.5f;     // Detection confidence threshold
     bool useAsync = false;          // Enable async inference
+    bool emitDebugBoxes = false;    // Populate raw/pre-filter debug candidates in LayoutResult
     int deviceId = -1;              // DXRT device affinity (-1 = runtime default)
 };
 
@@ -93,7 +94,9 @@ private:
     std::vector<LayoutBox> postprocess(
         const std::vector<std::vector<float>>& dxOutputs,
         const cv::Size& imShape,
-        const cv::Point2f& scaleFactor
+        const cv::Point2f& scaleFactor,
+        std::vector<LayoutDebugBox>* rawDebugBoxes,
+        std::vector<LayoutDebugBox>* prefilterDebugBoxes
     );
 
     struct Impl;

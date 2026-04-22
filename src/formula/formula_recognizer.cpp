@@ -423,6 +423,7 @@ std::vector<std::string> FormulaRecognizer::recognizeBatch(
     double decodeMs = 0.0;
     double normalizeMs = 0.0;
     int batchCount = 0;
+    std::vector<BatchRecord> batchRecords;
 
     std::vector<PackedCrop> packed;
     packed.reserve(formulaCrops.size());
@@ -456,8 +457,17 @@ std::vector<std::string> FormulaRecognizer::recognizeBatch(
         size_t end,
         std::vector<float>& inputScratch)
     {
-        const int h = packedRef[groupIndices[begin]].h;
-        const int w = packedRef[groupIndices[begin]].w;
+        int h = 0;
+        int w = 0;
+        bool allSameShape = true;
+        const int firstH = packedRef[groupIndices[begin]].h;
+        const int firstW = packedRef[groupIndices[begin]].w;
+        for (size_t cursor = begin; cursor < end; ++cursor) {
+            const auto& item = packedRef[groupIndices[cursor]];
+            h = std::max(h, item.h);
+            w = std::max(w, item.w);
+            allSameShape = allSameShape && item.h == firstH && item.w == firstW;
+        }
         const size_t batchSizeU = end - begin;
         const int64_t batchSize = static_cast<int64_t>(batchSizeU);
         const int64_t sampleSize = static_cast<int64_t>(h) * static_cast<int64_t>(w);
@@ -466,12 +476,24 @@ std::vector<std::string> FormulaRecognizer::recognizeBatch(
         if (inputScratch.size() < requiredSize) {
             inputScratch.resize(requiredSize);
         }
+        if (!allSameShape) {
+            std::fill(inputScratch.begin(), inputScratch.begin() + requiredSize, 1.0f);
+        }
         for (size_t i = 0; i < batchSizeU; ++i) {
             const size_t packedIdx = groupIndices[begin + i];
-            std::memcpy(
-                inputScratch.data() + (i * sampleSizeU),
-                packedRef[packedIdx].tensor.data(),
-                sampleSizeU * sizeof(float));
+            const auto& item = packedRef[packedIdx];
+            float* dst = inputScratch.data() + (i * sampleSizeU);
+            if (item.h == h && item.w == w) {
+                std::memcpy(dst, item.tensor.data(), sampleSizeU * sizeof(float));
+            } else {
+                for (int row = 0; row < item.h; ++row) {
+                    std::memcpy(
+                        dst + (static_cast<size_t>(row) * static_cast<size_t>(w)),
+                        item.tensor.data() +
+                            (static_cast<size_t>(row) * static_cast<size_t>(item.w)),
+                        static_cast<size_t>(item.w) * sizeof(float));
+                }
+            }
         }
 
         const std::array<int64_t, 4> inputShape{batchSize, 1, h, w};
@@ -493,8 +515,20 @@ std::vector<std::string> FormulaRecognizer::recognizeBatch(
             outputNames,
             1);
         const auto inferEnd = std::chrono::steady_clock::now();
-        inferMs += std::chrono::duration<double, std::milli>(inferEnd - inferStart).count();
+        const double batchInferMs =
+            std::chrono::duration<double, std::milli>(inferEnd - inferStart).count();
+        inferMs += batchInferMs;
         ++batchCount;
+        BatchRecord record;
+        record.batchSize = static_cast<int>(batchSizeU);
+        record.targetH = h;
+        record.targetW = w;
+        record.inferMs = batchInferMs;
+        record.cropIndices.reserve(batchSizeU);
+        for (size_t i = begin; i < end; ++i) {
+            record.cropIndices.push_back(static_cast<int>(packedRef[groupIndices[i]].index));
+        }
+        batchRecords.push_back(std::move(record));
 
         if (ortOutputs.empty() || !ortOutputs.front().IsTensor()) {
             throw std::runtime_error("Formula ONNX output tensor missing");
@@ -527,30 +561,38 @@ std::vector<std::string> FormulaRecognizer::recognizeBatch(
         }
     };
 
-    // Group by tensor shape to keep dynamic-shape batch inference safe.
-    std::unordered_map<std::string, std::vector<size_t>> groups;
-    groups.reserve(packed.size());
-    for (size_t idx = 0; idx < packed.size(); ++idx) {
-        const auto& item = packed[idx];
-        const std::string key = std::to_string(item.h) + "x" + std::to_string(item.w);
-        groups[key].push_back(idx);
-    }
-
-    for (const auto& kv : groups) {
-        const auto& groupIndices = kv.second;
-        if (groupIndices.empty()) {
-            continue;
-        }
-        const size_t maxBatchSize =
-            (config_.maxBatchSize > 0)
-                ? static_cast<size_t>(config_.maxBatchSize)
-                : groupIndices.size();
-        const size_t sampleSizeU = static_cast<size_t>(
-            packed[groupIndices.front()].h * packed[groupIndices.front()].w);
-        std::vector<float> inputScratch(maxBatchSize * sampleSizeU);
+    const size_t maxBatchSize =
+        (config_.maxBatchSize > 0)
+            ? static_cast<size_t>(config_.maxBatchSize)
+            : packed.size();
+    std::vector<float> inputScratch;
+    if (config_.packDynamicShapes) {
+        std::vector<size_t> groupIndices(packed.size());
+        std::iota(groupIndices.begin(), groupIndices.end(), 0);
         for (size_t begin = 0; begin < groupIndices.size(); begin += maxBatchSize) {
             const size_t end = std::min(groupIndices.size(), begin + maxBatchSize);
             runPackedBatch(packed, groupIndices, begin, end, inputScratch);
+        }
+    } else {
+        // Compatibility mode: group by exact tensor shape to keep dynamic-shape
+        // batch inference identical to the original implementation.
+        std::unordered_map<std::string, std::vector<size_t>> groups;
+        groups.reserve(packed.size());
+        for (size_t idx = 0; idx < packed.size(); ++idx) {
+            const auto& item = packed[idx];
+            const std::string key = std::to_string(item.h) + "x" + std::to_string(item.w);
+            groups[key].push_back(idx);
+        }
+
+        for (const auto& kv : groups) {
+            const auto& groupIndices = kv.second;
+            if (groupIndices.empty()) {
+                continue;
+            }
+            for (size_t begin = 0; begin < groupIndices.size(); begin += maxBatchSize) {
+                const size_t end = std::min(groupIndices.size(), begin + maxBatchSize);
+                runPackedBatch(packed, groupIndices, begin, end, inputScratch);
+            }
         }
     }
 
@@ -562,6 +604,7 @@ std::vector<std::string> FormulaRecognizer::recognizeBatch(
         timing->normalizeMs = normalizeMs;
         timing->cropCount = static_cast<int>(packed.size());
         timing->batchCount = batchCount;
+        timing->batches = std::move(batchRecords);
         timing->totalMs =
             std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
     }

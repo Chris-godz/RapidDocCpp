@@ -23,6 +23,17 @@ PipelineConfig PipelineConfig::Default(const std::string& projectRoot) {
     // Formula model (same README lane as Python demo_offline.py --finegrained)
     cfg.models.formulaOnnxModel = projectRoot + "/.download_cache/onnx_models/pp_formulanet_plus_m.onnx";
 
+    // Table classifier (PaddleCls) — wired/wireless routing (mirrors Python
+    // rapid_table_self/table_cls/main.py). Optional: if the file is missing
+    // at runtime, TableRecognizer falls back to the legacy lineRatio heuristic.
+    cfg.models.tableClsOnnxModel = projectRoot + "/.download_cache/onnx_models/paddle_cls.onnx";
+
+    // SLANet+ wireless table structure model (mirrors Python
+    // rapid_table_self/model/slanet-plus.onnx). Optional: if missing at
+    // runtime, the wireless backend is disabled and pipeline falls back to
+    // the "[Unsupported table]" placeholder (same behavior as before port).
+    cfg.models.slanetPlusOnnxModel = projectRoot + "/.download_cache/onnx_models/slanet-plus.onnx";
+
     // Layout input size for pp_doclayout_l model
     cfg.runtime.layoutInputSize = 640;
 
@@ -58,6 +69,14 @@ std::string PipelineConfig::validate() const {
             return "Formula ONNX model not found: " + models.formulaOnnxModel;
     }
 
+    // Table classifier model check (non-fatal if missing when enabled: the
+    // recognizer falls back to the geometric heuristic). We therefore only
+    // emit an informational log upstream, not a validation error here.
+
+    // SLANet+ wireless table model check (non-fatal if missing when enabled:
+    // the wireless backend is disabled and the pipeline falls back to the
+    // unsupported-table placeholder — same behavior as before the port).
+
     return "";  // Valid
 }
 
@@ -81,6 +100,8 @@ void PipelineConfig::show() const {
     LOG_INFO("  Table UNET:       {}", models.tableUnetDxnnModel);
     LOG_INFO("  OCR model dir:    {}", models.ocrModelDir);
     LOG_INFO("  Formula ONNX:     {}", models.formulaOnnxModel);
+    LOG_INFO("  TableCls ONNX:    {}", models.tableClsOnnxModel);
+    LOG_INFO("  SLANet+ ONNX:     {}", models.slanetPlusOnnxModel);
     LOG_INFO("Runtime:");
     LOG_INFO("  PDF DPI:          {}", runtime.pdfDpi);
     LOG_INFO("  Max pages:        {}", runtime.maxPages);

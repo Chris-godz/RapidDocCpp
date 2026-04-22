@@ -86,10 +86,21 @@ struct LayoutBox {
 };
 
 /**
+ * @brief Optional layout debug candidate for raw/pre-filter trace
+ */
+struct LayoutDebugBox {
+    LayoutBox box;
+    int rawIndex = -1;
+    float confidenceThreshold = 0.0f;
+};
+
+/**
  * @brief Layout detection result for a single page
  */
 struct LayoutResult {
     std::vector<LayoutBox> boxes;
+    std::vector<LayoutDebugBox> rawDebugBoxes;
+    std::vector<LayoutDebugBox> prefilterDebugBoxes;
     double inferenceTimeMs = 0.0;
 
     // Filter helpers

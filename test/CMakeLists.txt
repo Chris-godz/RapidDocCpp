@@ -47,6 +47,8 @@ add_executable(rapiddoc_cross_tests
     test_table_preprocess.cpp
     test_table_inference.cpp
     test_table_postprocess.cpp
+    test_table_classifier_parity.cpp
+    test_table_wireless_recognizer.cpp
     test_ocr_integration.cpp
     test_live_inference.cpp
 )

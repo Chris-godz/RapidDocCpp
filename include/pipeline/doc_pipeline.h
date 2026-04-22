@@ -23,6 +23,7 @@
 #include "layout/layout_detector.h"
 #include "formula/formula_recognizer.h"
 #include "table/table_recognizer.h"
+#include "table/table_wireless_recognizer.h"
 #include "reading_order/xycut.h"
 #include "output/markdown_writer.h"
 #include "output/content_list.h"
@@ -323,9 +324,11 @@ private:
     std::unique_ptr<FormulaRecognizer> formulaRecognizer_;
     std::unique_ptr<FormulaRecognizer> formulaRecognizerSecondary_;
     std::unique_ptr<TableRecognizer> tableRecognizer_;
+    std::unique_ptr<TableWirelessRecognizer> wirelessRecognizer_;
     std::unique_ptr<ocr::OCRPipeline> ocrPipeline_;
     std::mutex npuSerialMutex_;
     std::mutex* externalNpuSerialMutex_ = nullptr;
+    int formulaMaxBatchSize_ = 8;
     bool formulaDualSessionEnabled_ = false;
     size_t formulaDualSessionMinCrops_ = 96;
 

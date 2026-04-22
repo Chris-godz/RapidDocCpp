@@ -25,6 +25,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -35,6 +36,50 @@
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+
+bool envFlagOrDefault(const char* key, bool defaultValue) {
+    const char* raw = std::getenv(key);
+    if (raw == nullptr) {
+        return defaultValue;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (value == "1" || value == "true" || value == "yes" || value == "on") {
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "no" || value == "off") {
+        return false;
+    }
+    return defaultValue;
+}
+
+int envIntOrDefault(const char* key, int defaultValue) {
+    const char* raw = std::getenv(key);
+    if (raw == nullptr || *raw == '\0') {
+        return defaultValue;
+    }
+    try {
+        return std::stoi(raw);
+    } catch (...) {
+        return defaultValue;
+    }
+}
+
+json formulaBatchRecordsToJson(const rapid_doc::FormulaRecognizer::BatchTiming& timing) {
+    json batches = json::array();
+    for (const auto& batch : timing.batches) {
+        batches.push_back({
+            {"batch_size", batch.batchSize},
+            {"target_h", batch.targetH},
+            {"target_w", batch.targetW},
+            {"infer_ms", batch.inferMs},
+            {"crop_indices", batch.cropIndices},
+        });
+    }
+    return batches;
+}
 
 void printUsage(const char* programName) {
     std::cout << "RapidDoc C++ - Document Analysis Pipeline (DEEPX NPU)\n\n";
@@ -55,6 +100,7 @@ void printUsage(const char* programName) {
     std::cout << "Note: Formula recognition runs through ONNX Runtime when enabled.\n";
     std::cout << "      Wireless table recognition is still unsupported on DEEPX NPU.\n";
     std::cout << "      Set RAPIDDOC_FORMULA_TRACE=1 to emit formula trace sidecar JSON.\n";
+    std::cout << "      Set RAPIDDOC_FORMULA_DUMP_CROPS_DIR=<dir> to save formula input crops (cpp_infer_order_*.png).\n";
 }
 
 struct CliArgs {
@@ -222,8 +268,28 @@ int runFormulaReplay(const CliArgs& args) {
     rapid_doc::FormulaRecognizerConfig config;
     config.onnxModelPath = modelPath;
     config.inputSize = 384;
-    config.enableCpuMemArena = false;
+    config.enableCpuMemArena =
+        envFlagOrDefault("RAPIDDOC_FORMULA_CPU_MEM_ARENA", true);
     config.maxBatchSize = args.formulaReplayBatchSize;
+    config.packDynamicShapes =
+        envFlagOrDefault("RAPIDDOC_FORMULA_PACK_DYNAMIC_SHAPES", true);
+    const char* ortProfileRaw = std::getenv("RAPIDDOC_FORMULA_ORT_PROFILE");
+    const std::string ortProfile = ortProfileRaw == nullptr ? "" : std::string(ortProfileRaw);
+    if (ortProfile == "constrained") {
+        config.sequentialExecution = true;
+        config.intraOpThreads = 1;
+        config.interOpThreads = 1;
+    } else if (ortProfile == "sequential") {
+        config.sequentialExecution = true;
+    }
+    const int intraThreads = envIntOrDefault("RAPIDDOC_FORMULA_ORT_INTRA_THREADS", -1);
+    const int interThreads = envIntOrDefault("RAPIDDOC_FORMULA_ORT_INTER_THREADS", -1);
+    if (intraThreads > 0) {
+        config.intraOpThreads = intraThreads;
+    }
+    if (interThreads > 0) {
+        config.interOpThreads = interThreads;
+    }
 
     rapid_doc::FormulaRecognizer recognizer(config);
     if (!recognizer.initialize()) {
@@ -252,6 +318,11 @@ int runFormulaReplay(const CliArgs& args) {
         {"crop_dir", fs::absolute(args.formulaReplayCropDir).string()},
         {"crop_count", static_cast<int>(cropPaths.size())},
         {"batch_size", args.formulaReplayBatchSize},
+        {"dynamic_shape_packing", config.packDynamicShapes},
+        {"cpu_mem_arena", config.enableCpuMemArena},
+        {"ort_profile", ortProfile.empty() ? "default" : ortProfile},
+        {"ort_intra_threads", config.intraOpThreads},
+        {"ort_inter_threads", config.interOpThreads},
         {"model_path", fs::absolute(modelPath).string()},
         {"pure_infer_ms", timing.inferMs},
         {"avg_infer_ms_per_crop",
@@ -269,6 +340,7 @@ int runFormulaReplay(const CliArgs& args) {
             {"total_ms", timing.totalMs},
             {"crop_count", timing.cropCount},
             {"batch_count", timing.batchCount},
+            {"batches", formulaBatchRecordsToJson(timing)},
         }},
         {"crops", std::move(cropInputs)},
         {"outputs", std::move(outputs)},

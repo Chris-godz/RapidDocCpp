@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <future>
 #include <iomanip>
+#include <map>
 #include <numeric>
 #include <sstream>
 #include <utility>
@@ -84,6 +85,10 @@ struct TableNpuResult {
     int pageIndex = 0;
     bool hasTableResult = false;
     bool hasFallback = false;
+    // When true, the wired NPU path will not be attempted (or produced no
+    // cells) and the SLANet+ wireless backend should be used as a second
+    // try. OCR is still scheduled for this entry so the matcher has text.
+    bool needsWirelessBackend = false;
     std::string fallbackReason;
     TableResult tableResult;
     TableRecognizer::NpuStageResult npuStage;
@@ -100,6 +105,24 @@ bool envFlagEnabled(const char* key) {
         return static_cast<char>(std::tolower(c));
     });
     return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+bool envFlagOrDefault(const char* key, bool defaultValue) {
+    const char* raw = std::getenv(key);
+    if (raw == nullptr) {
+        return defaultValue;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (value == "1" || value == "true" || value == "yes" || value == "on") {
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "no" || value == "off") {
+        return false;
+    }
+    return defaultValue;
 }
 
 int envIntOrDefault(const char* key, int defaultValue) {
@@ -134,6 +157,17 @@ double intersectionArea(const cv::Rect& a, const cv::Rect& b) {
         return 0.0;
     }
     return static_cast<double>(inter.width) * static_cast<double>(inter.height);
+}
+
+double rectIou(const cv::Rect& a, const cv::Rect& b) {
+    const double inter = intersectionArea(a, b);
+    if (inter <= 0.0) {
+        return 0.0;
+    }
+    const double areaA = static_cast<double>(a.width) * static_cast<double>(a.height);
+    const double areaB = static_cast<double>(b.width) * static_cast<double>(b.height);
+    const double denom = areaA + areaB - inter;
+    return denom > 0.0 ? inter / denom : 0.0;
 }
 
 bool centerInside(const cv::Rect& outer, const cv::Rect& inner) {
@@ -317,6 +351,281 @@ bool shouldFilterFormulaCandidateConservative(
     return false;
 }
 
+double verticalOverlapRatio(const cv::Rect& a, const cv::Rect& b) {
+    const int y0 = std::max(a.y, b.y);
+    const int y1 = std::min(a.y + a.height, b.y + b.height);
+    const int overlap = std::max(0, y1 - y0);
+    const int minHeight = std::min(a.height, b.height);
+    if (minHeight <= 0) {
+        return 0.0;
+    }
+    return static_cast<double>(overlap) / static_cast<double>(minHeight);
+}
+
+int horizontalGap(const cv::Rect& a, const cv::Rect& b) {
+    if (a.x <= b.x) {
+        return b.x - (a.x + a.width);
+    }
+    return a.x - (b.x + b.width);
+}
+
+bool shouldMergeFormulaFragments(
+    const LayoutBox& lhs,
+    const LayoutBox& rhs,
+    int pageWidth,
+    int pageHeight)
+{
+    const cv::Rect left = clampRectToPage(lhs, pageWidth, pageHeight);
+    const cv::Rect right = clampRectToPage(rhs, pageWidth, pageHeight);
+    if (left.width <= 0 || left.height <= 0 || right.width <= 0 || right.height <= 0) {
+        return false;
+    }
+
+    const double overlap = verticalOverlapRatio(left, right);
+    if (overlap < 0.72) {
+        return false;
+    }
+
+    const double heightRatio =
+        static_cast<double>(std::max(left.height, right.height)) /
+        static_cast<double>(std::max(1, std::min(left.height, right.height)));
+    if (heightRatio > 1.45) {
+        return false;
+    }
+    if (std::min(left.width, right.width) < 96) {
+        return false;
+    }
+
+    const int gap = horizontalGap(left, right);
+    if (gap < -8) {
+        return false;
+    }
+
+    const int maxGap = std::max(28, static_cast<int>(
+        std::lround(static_cast<double>(std::max(left.height, right.height)) * 0.85)));
+    if (gap > maxGap) {
+        return false;
+    }
+
+    const cv::Rect merged = left | right;
+    const double mergedWidthRatio =
+        pageWidth > 0 ? static_cast<double>(merged.width) / static_cast<double>(pageWidth) : 1.0;
+    // Keep this conservative: only merge near-neighbor fragments, not two formulas
+    // that happen to sit on the same baseline across columns.
+    return mergedWidthRatio <= 0.38;
+}
+
+LayoutBox mergeFormulaBoxes(const LayoutBox& lhs, const LayoutBox& rhs) {
+    LayoutBox merged = lhs;
+    merged.x0 = std::min(lhs.x0, rhs.x0);
+    merged.y0 = std::min(lhs.y0, rhs.y0);
+    merged.x1 = std::max(lhs.x1, rhs.x1);
+    merged.y1 = std::max(lhs.y1, rhs.y1);
+    merged.confidence = std::max(lhs.confidence, rhs.confidence);
+    merged.category = LayoutCategory::EQUATION;
+    merged.label = lhs.label == rhs.label ? lhs.label : "formula";
+    merged.clsId = lhs.clsId == rhs.clsId ? lhs.clsId : 7;
+    return merged;
+}
+
+bool shouldSuppressDuplicateFormulaCandidate(
+    const LayoutBox& kept,
+    const LayoutBox& candidate,
+    int pageWidth,
+    int pageHeight)
+{
+    const cv::Rect keptRoi = clampRectToPage(kept, pageWidth, pageHeight);
+    const cv::Rect candidateRoi = clampRectToPage(candidate, pageWidth, pageHeight);
+    if (keptRoi.width <= 0 || keptRoi.height <= 0 ||
+        candidateRoi.width <= 0 || candidateRoi.height <= 0) {
+        return false;
+    }
+    if (rectIou(keptRoi, candidateRoi) < 0.92) {
+        return false;
+    }
+    if (verticalOverlapRatio(keptRoi, candidateRoi) < 0.90) {
+        return false;
+    }
+    return kept.confidence >= candidate.confidence;
+}
+
+std::string formulaCandidateShapeClass(
+    const LayoutBox& candidate,
+    int pageWidth,
+    int pageHeight)
+{
+    if (candidate.label == "formula_number" ||
+        candidate.label == "interline_equation_number" ||
+        candidate.clsId == 19) {
+        return "formula_number";
+    }
+
+    const cv::Rect roi = clampRectToPage(candidate, pageWidth, pageHeight);
+    if (roi.width <= 0 || roi.height <= 0 || pageWidth <= 0 || pageHeight <= 0) {
+        return "invalid_roi";
+    }
+    const double pageArea = static_cast<double>(pageWidth) * static_cast<double>(pageHeight);
+    const double areaRatio =
+        static_cast<double>(roi.width) * static_cast<double>(roi.height) / pageArea;
+    const double widthRatio = static_cast<double>(roi.width) / static_cast<double>(pageWidth);
+    const double aspect = static_cast<double>(roi.width) / static_cast<double>(std::max(1, roi.height));
+
+    if (areaRatio <= 0.0018 && widthRatio <= 0.08 && aspect <= 2.4) {
+        return "panel_marker_sized";
+    }
+    if (areaRatio <= 0.0035 && widthRatio <= 0.14) {
+        return "small_inline_candidate";
+    }
+    if (aspect >= 4.0 && widthRatio <= 0.22) {
+        return "wide_formula_fragment";
+    }
+    return "formula_candidate";
+}
+
+json formulaBatchProfileJson(
+    const FormulaRecognizer::BatchTiming& primary,
+    const FormulaRecognizer::BatchTiming& secondary,
+    int configuredBatchSize)
+{
+    json batches = json::array();
+    std::map<int, int> batchSizeHistogram;
+    std::map<std::string, int> shapeHistogram;
+    int singletonBatchCount = 0;
+    int maxEffectiveBatchSize = 0;
+
+    auto append = [&](const FormulaRecognizer::BatchTiming& timing, const std::string& session) {
+        for (const auto& record : timing.batches) {
+            const std::string shape =
+                std::to_string(record.targetH) + "x" + std::to_string(record.targetW);
+            ++batchSizeHistogram[record.batchSize];
+            ++shapeHistogram[shape];
+            if (record.batchSize == 1) {
+                ++singletonBatchCount;
+            }
+            maxEffectiveBatchSize = std::max(maxEffectiveBatchSize, record.batchSize);
+            batches.push_back(json{
+                {"session", session},
+                {"batch_size", record.batchSize},
+                {"target_h", record.targetH},
+                {"target_w", record.targetW},
+                {"shape", shape},
+                {"infer_ms", record.inferMs},
+                {"crop_indices", record.cropIndices},
+            });
+        }
+    };
+
+    append(primary, "primary");
+    append(secondary, "secondary");
+
+    json sizeHistogramJson = json::object();
+    for (const auto& kv : batchSizeHistogram) {
+        sizeHistogramJson[std::to_string(kv.first)] = kv.second;
+    }
+    json shapeHistogramJson = json::object();
+    for (const auto& kv : shapeHistogram) {
+        shapeHistogramJson[kv.first] = kv.second;
+    }
+
+    return json{
+        {"configured_batch_size", configuredBatchSize},
+        {"max_effective_batch_size", maxEffectiveBatchSize},
+        {"singleton_batch_count", singletonBatchCount},
+        {"batch_size_histogram", std::move(sizeHistogramJson)},
+        {"tensor_shape_histogram", std::move(shapeHistogramJson)},
+        {"batches", std::move(batches)},
+    };
+}
+
+std::vector<LayoutBox> refineFormulaCandidatesConservative(
+    const std::vector<LayoutBox>& rawEquationBoxes,
+    int pageIndex,
+    int pageWidth,
+    int pageHeight,
+    json* formulaTrace)
+{
+    std::vector<LayoutBox> refined;
+    refined.reserve(rawEquationBoxes.size());
+    std::vector<bool> used(rawEquationBoxes.size(), false);
+
+    for (size_t i = 0; i < rawEquationBoxes.size(); ++i) {
+        if (used[i]) {
+            continue;
+        }
+        LayoutBox current = rawEquationBoxes[i];
+        used[i] = true;
+        json mergedFrom = json::array({static_cast<int>(i)});
+
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t j = i + 1; j < rawEquationBoxes.size(); ++j) {
+                if (used[j]) {
+                    continue;
+                }
+                if (!shouldMergeFormulaFragments(
+                        current,
+                        rawEquationBoxes[j],
+                        pageWidth,
+                        pageHeight)) {
+                    continue;
+                }
+                current = mergeFormulaBoxes(current, rawEquationBoxes[j]);
+                used[j] = true;
+                mergedFrom.push_back(static_cast<int>(j));
+                changed = true;
+            }
+        }
+
+        if (formulaTrace != nullptr && mergedFrom.size() > 1) {
+            json refinement = layoutBoxTraceJson(current);
+            refinement["page"] = pageIndex;
+            refinement["action"] = "merge_same_line_fragments";
+            refinement["source_raw_candidate_indices"] = std::move(mergedFrom);
+            (*formulaTrace)["candidate_refinements"].push_back(std::move(refinement));
+        }
+        refined.push_back(std::move(current));
+    }
+
+    std::vector<LayoutBox> deduped;
+    deduped.reserve(refined.size());
+    for (size_t candidateIdx = 0; candidateIdx < refined.size(); ++candidateIdx) {
+        const auto& candidate = refined[candidateIdx];
+        bool suppressed = false;
+        for (size_t keptIdx = 0; keptIdx < deduped.size(); ++keptIdx) {
+            if (!shouldSuppressDuplicateFormulaCandidate(
+                    deduped[keptIdx],
+                    candidate,
+                    pageWidth,
+                    pageHeight)) {
+                continue;
+            }
+            if (formulaTrace != nullptr) {
+                json refinement = layoutBoxTraceJson(candidate);
+                refinement["page"] = pageIndex;
+                refinement["action"] = "suppress_duplicate_formula_candidate";
+                refinement["source_refined_candidate_index"] =
+                    static_cast<int>(candidateIdx);
+                refinement["kept_refined_candidate_index"] =
+                    static_cast<int>(keptIdx);
+                refinement["kept_bbox"] = {
+                    deduped[keptIdx].x0,
+                    deduped[keptIdx].y0,
+                    deduped[keptIdx].x1,
+                    deduped[keptIdx].y1,
+                };
+                (*formulaTrace)["candidate_refinements"].push_back(std::move(refinement));
+            }
+            suppressed = true;
+            break;
+        }
+        if (!suppressed) {
+            deduped.push_back(candidate);
+        }
+    }
+    return deduped;
+}
+
 std::vector<OcrWorkItem> buildOcrWorkItems(
     const cv::Mat& image,
     const std::vector<LayoutBox>& textBoxes,
@@ -355,6 +664,22 @@ std::string combineOcrTextLines(const std::vector<ocr::PipelineOCRResult>& ocrRe
         combined += r.text;
     }
     return combined;
+}
+
+// Adapt pipeline OCR results to the wireless recognizer's decoupled input.
+// The wireless recognizer is deliberately headerless w.r.t. DXNN-OCR-cpp.
+std::vector<WirelessOcrBox> toWirelessOcrBoxes(
+    const std::vector<ocr::PipelineOCRResult>& in)
+{
+    std::vector<WirelessOcrBox> out;
+    out.reserve(in.size());
+    for (const auto& r : in) {
+        WirelessOcrBox b;
+        b.aabb = r.getBoundingRect();
+        b.text = r.text;
+        out.push_back(std::move(b));
+    }
+    return out;
 }
 
 void matchTableOcrToCells(
@@ -445,6 +770,9 @@ bool DocPipeline::initialize() {
         layoutCfg.onnxSubModelPath = config_.models.layoutOnnxSubModel;
         layoutCfg.inputSize = config_.runtime.layoutInputSize;
         layoutCfg.confThreshold = config_.runtime.layoutConfThreshold;
+        layoutCfg.emitDebugBoxes =
+            envFlagEnabled("RAPIDDOC_FORMULA_TRACE") ||
+            envFlagEnabled("RAPIDDOC_LAYOUT_TRACE_RAW");
         layoutCfg.deviceId = config_.runtime.deviceId;
         layoutDetector_ = std::make_unique<LayoutDetector>(layoutCfg);
         if (!layoutDetector_->initialize()) {
@@ -458,8 +786,13 @@ bool DocPipeline::initialize() {
         FormulaRecognizerConfig formulaCfg;
         formulaCfg.onnxModelPath = config_.models.formulaOnnxModel;
         formulaCfg.inputSize = 384;
-        formulaCfg.enableCpuMemArena = false;
-        formulaCfg.maxBatchSize = 8;
+        formulaCfg.enableCpuMemArena =
+            envFlagOrDefault("RAPIDDOC_FORMULA_CPU_MEM_ARENA", true);
+        formulaCfg.maxBatchSize =
+            std::max(1, envIntOrDefault("RAPIDDOC_FORMULA_MAX_BATCH_SIZE", 8));
+        formulaMaxBatchSize_ = formulaCfg.maxBatchSize;
+        formulaCfg.packDynamicShapes =
+            envFlagOrDefault("RAPIDDOC_FORMULA_PACK_DYNAMIC_SHAPES", true);
 
         const char* ortProfileRaw = std::getenv("RAPIDDOC_FORMULA_ORT_PROFILE");
         const std::string ortProfile = ortProfileRaw == nullptr ? "" : std::string(ortProfileRaw);
@@ -485,7 +818,12 @@ bool DocPipeline::initialize() {
             LOG_ERROR("Failed to initialize formula recognizer");
             return false;
         }
-        formulaDualSessionEnabled_ = envFlagEnabled("RAPIDDOC_FORMULA_DUAL_SESSION");
+        // Physics papers etc. often produce 150+ formula crops. CPU ONNX at
+        // batch=8 costs ~9s/batch, so serial inference produces a 3-minute
+        // tail. Enable a second parallel session by default (env override
+        // still supported via RAPIDDOC_FORMULA_DUAL_SESSION=0).
+        formulaDualSessionEnabled_ =
+            envFlagOrDefault("RAPIDDOC_FORMULA_DUAL_SESSION", true);
         formulaDualSessionMinCrops_ = static_cast<size_t>(std::max(
             1,
             envIntOrDefault("RAPIDDOC_FORMULA_DUAL_SESSION_MIN_CROPS", 96)));
@@ -501,8 +839,11 @@ bool DocPipeline::initialize() {
 
         LOG_INFO("Formula recognizer initialized (ONNX Runtime)");
         LOG_INFO(
-            "Formula infer profile: ort_profile='{}', dual_session={}, dual_session_min_crops={}",
+            "Formula infer profile: ort_profile='{}', max_batch_size={}, cpu_mem_arena={}, dynamic_shape_packing={}, dual_session={}, dual_session_min_crops={}",
             ortProfile.empty() ? "default" : ortProfile,
+            formulaMaxBatchSize_,
+            formulaCfg.enableCpuMemArena ? "enabled" : "disabled",
+            formulaCfg.packDynamicShapes ? "enabled" : "disabled",
             formulaDualSessionEnabled_ ? "enabled" : "disabled",
             formulaDualSessionMinCrops_);
     }
@@ -513,12 +854,33 @@ bool DocPipeline::initialize() {
         tableCfg.unetDxnnModelPath = config_.models.tableUnetDxnnModel;
         tableCfg.threshold = config_.runtime.tableConfThreshold;
         tableCfg.deviceId = config_.runtime.deviceId;
+        // PaddleCls wired/wireless router (parity with Python TableCls).
+        // A missing classifier model is non-fatal: TableRecognizer falls back
+        // to its legacy lineRatio heuristic.
+        tableCfg.enableTableCls = config_.stages.enableTableClassify;
+        tableCfg.tableClsOnnxModelPath = config_.models.tableClsOnnxModel;
         tableRecognizer_ = std::make_unique<TableRecognizer>(tableCfg);
         if (!tableRecognizer_->initialize()) {
             LOG_ERROR("Failed to initialize table recognizer");
             return false;
         }
         LOG_INFO("Table recognizer initialized (wired tables only)");
+    }
+
+    // Initialize wireless table recognizer (SLANet+). Non-fatal if the ONNX
+    // model is missing: the pipeline falls back to the legacy unsupported
+    // placeholder — same behavior as before the port.
+    if (config_.stages.enableWirelessTable) {
+        TableWirelessRecognizerConfig wCfg;
+        wCfg.onnxModelPath = config_.models.slanetPlusOnnxModel;
+        wirelessRecognizer_ = std::make_unique<TableWirelessRecognizer>(wCfg);
+        if (!wirelessRecognizer_->initialize()) {
+            LOG_WARN("Wireless table recognizer disabled (model unavailable): {}",
+                     config_.models.slanetPlusOnnxModel);
+            wirelessRecognizer_.reset();
+        } else {
+            LOG_INFO("Wireless table recognizer initialized (SLANet+)");
+        }
     }
 
     // Initialize OCR pipeline (from DXNN-OCR-cpp)
@@ -769,6 +1131,7 @@ DocumentResult DocPipeline::processPdfFromMemoryInternal(
         result.pages.push_back(std::move(pageResult));
         result.processedPages++;
     }
+
     if (deferFormulaStage) {
         runDocumentFormulaStage(pageImages, result, ctx);
     }
@@ -1032,6 +1395,37 @@ PageResult DocPipeline::processPage(
                 } else {
                     // CPU-only crop clone: safe outside NPU serial lock.
                     item.crop = image(roi).clone();
+
+                    // Env-gated routing dump: persist the table crop before recognition.
+                    const char* tableDumpDir = std::getenv("RAPIDDOC_TABLE_DUMP_CROPS_DIR");
+                    if (tableDumpDir != nullptr && tableDumpDir[0] != '\0') {
+                        const fs::path dumpRoot(tableDumpDir);
+                        std::error_code ec;
+                        fs::create_directories(dumpRoot, ec);
+                        if (!ec) {
+                            std::ostringstream name;
+                            name << "table_p" << std::setw(3) << std::setfill('0')
+                                 << item.pageIndex
+                                 << "_" << roi.x << "_" << roi.y
+                                 << "_" << (roi.x + roi.width) << "_" << (roi.y + roi.height)
+                                 << ".png";
+                            const fs::path outPath = dumpRoot / name.str();
+                            if (!cv::imwrite(outPath.string(), item.crop)) {
+                                LOG_WARN("TABLE_ROUTE_TRACE imwrite failed: {}", outPath.string());
+                            }
+                        } else {
+                            LOG_WARN("TABLE_ROUTE_TRACE mkdir {} failed: {}",
+                                     dumpRoot.string(), ec.message());
+                        }
+                    }
+
+                    const char* tableTrace = std::getenv("RAPIDDOC_TABLE_TRACE");
+                    if (tableTrace != nullptr && tableTrace[0] != '\0' && tableTrace[0] != '0') {
+                        LOG_INFO(
+                            "TABLE_ROUTE_TRACE pipeline page={} bbox=[{},{},{},{}] crop={}x{}",
+                            item.pageIndex, roi.x, roi.y, roi.x + roi.width, roi.y + roi.height,
+                            item.crop.cols, item.crop.rows);
+                    }
                 }
                 tableWorkItems.push_back(std::move(item));
             }
@@ -1059,6 +1453,14 @@ PageResult DocPipeline::processPage(
                     npuResult.tableResult = recognizeTable(item.crop);
                     npuResult.hasTableResult = true;
                     if (!npuResult.tableResult.supported) {
+                        if (npuResult.tableResult.type == TableType::WIRELESS
+                            && wirelessRecognizer_) {
+                            // Defer OCR + wireless recovery; don't fallback yet.
+                            npuResult.needsWirelessBackend = true;
+                            npuResult.hasTableResult = false;
+                            tableNpuResults.push_back(std::move(npuResult));
+                            continue;
+                        }
                         npuResult.hasFallback = true;
                         npuResult.fallbackReason =
                             (npuResult.tableResult.type == TableType::WIRELESS)
@@ -1069,6 +1471,13 @@ PageResult DocPipeline::processPage(
                     }
 
                     if (npuResult.tableResult.cells.empty()) {
+                        // wired decode but no cells → try SLANet+ second-pass.
+                        if (wirelessRecognizer_) {
+                            npuResult.needsWirelessBackend = true;
+                            npuResult.hasTableResult = false;
+                            tableNpuResults.push_back(std::move(npuResult));
+                            continue;
+                        }
                         npuResult.hasFallback = true;
                         npuResult.fallbackReason = "no_cell_table";
                         tableNpuResults.push_back(std::move(npuResult));
@@ -1077,6 +1486,14 @@ PageResult DocPipeline::processPage(
                 } else {
                     npuResult.npuStage = recognizeTableNpuStage(item.crop);
                     if (!npuResult.npuStage.supported) {
+                        if (npuResult.npuStage.type == TableType::WIRELESS
+                            && wirelessRecognizer_) {
+                            // Wireless routing: skip wired NPU decode, defer
+                            // for SLANet+ second-pass after OCR.
+                            npuResult.needsWirelessBackend = true;
+                            tableNpuResults.push_back(std::move(npuResult));
+                            continue;
+                        }
                         npuResult.hasFallback = true;
                         npuResult.fallbackReason =
                             (npuResult.npuStage.type == TableType::WIRELESS)
@@ -1095,7 +1512,9 @@ PageResult DocPipeline::processPage(
             auto postprocessStart = std::chrono::steady_clock::now();
             for (size_t i = 0; i < tableNpuResults.size(); ++i) {
                 auto& npuResult = tableNpuResults[i];
-                if (npuResult.hasFallback || npuResult.hasTableResult) {
+                if (npuResult.hasFallback
+                    || npuResult.hasTableResult
+                    || npuResult.needsWirelessBackend) {
                     continue;
                 }
 
@@ -1104,6 +1523,12 @@ PageResult DocPipeline::processPage(
                 npuResult.hasTableResult = true;
 
                 if (!npuResult.tableResult.supported) {
+                    if (npuResult.tableResult.type == TableType::WIRELESS
+                        && wirelessRecognizer_) {
+                        npuResult.needsWirelessBackend = true;
+                        npuResult.hasTableResult = false;
+                        continue;
+                    }
                     npuResult.hasFallback = true;
                     npuResult.fallbackReason =
                         (npuResult.tableResult.type == TableType::WIRELESS)
@@ -1113,6 +1538,14 @@ PageResult DocPipeline::processPage(
                 }
 
                 if (npuResult.tableResult.cells.empty()) {
+                    // wired backend produced no cells — try SLANet+ as a
+                    // second pass (covers weakly bordered tables that UNET
+                    // misses, e.g. 表格1 page1-6 case).
+                    if (wirelessRecognizer_) {
+                        npuResult.needsWirelessBackend = true;
+                        npuResult.hasTableResult = false;
+                        continue;
+                    }
                     npuResult.hasFallback = true;
                     npuResult.fallbackReason = "no_cell_table";
                     continue;
@@ -1130,7 +1563,14 @@ PageResult DocPipeline::processPage(
             tableOcrNpuMs = runNpuSerialized([&]() {
                 for (size_t i = 0; i < tableNpuResults.size(); ++i) {
                     auto& npuResult = tableNpuResults[i];
-                    if (npuResult.hasFallback || !npuResult.hasTableResult) {
+                    // OCR runs for both wired-decoded tables (to fill cell
+                    // text via matchTableOcrToCells) AND wireless candidates
+                    // (SLANet+ matcher consumes OCR boxes to emit HTML with
+                    // text).
+                    const bool needsOcr =
+                        (!npuResult.hasFallback && npuResult.hasTableResult)
+                        || npuResult.needsWirelessBackend;
+                    if (!needsOcr) {
                         continue;
                     }
 
@@ -1151,14 +1591,39 @@ PageResult DocPipeline::processPage(
         {
             auto assembleStart = std::chrono::steady_clock::now();
             tableElements.reserve(tableNpuResults.size());
-            for (auto& npuResult : tableNpuResults) {
+            for (size_t ti = 0; ti < tableNpuResults.size(); ++ti) {
+                auto& npuResult = tableNpuResults[ti];
+                // Wireless second-pass: run SLANet+ with the OCR boxes we
+                // already collected for this crop. If it produces HTML, we
+                // promote it to the primary table result; otherwise we fall
+                // back to the unsupported-table placeholder.
+                if (npuResult.needsWirelessBackend && wirelessRecognizer_) {
+                    TableResult wr = wirelessRecognizer_->recognize(
+                        tableWorkItems[ti].crop,
+                        toWirelessOcrBoxes(npuResult.ocrBoxes));
+                    if (wr.supported && !wr.html.empty()) {
+                        npuResult.tableResult = std::move(wr);
+                        npuResult.tableResult.type = TableType::WIRELESS;
+                        npuResult.hasTableResult = true;
+                        npuResult.hasFallback = false;
+                    } else {
+                        npuResult.hasFallback = true;
+                        npuResult.fallbackReason = "wireless_table";
+                    }
+                    npuResult.needsWirelessBackend = false;
+                }
+
                 if (npuResult.hasFallback) {
                     tableElements.push_back(makeTableFallbackElement(
                         npuResult.box, npuResult.pageIndex, npuResult.fallbackReason));
                     continue;
                 }
 
-                matchTableOcrToCells(npuResult.tableResult, npuResult.ocrBoxes);
+                // Only the wired path uses cell-grid OCR matching; the
+                // wireless backend already consumed OCR boxes to emit HTML.
+                if (npuResult.tableResult.html.empty()) {
+                    matchTableOcrToCells(npuResult.tableResult, npuResult.ocrBoxes);
+                }
 
                 ContentElement elem;
                 elem.type = ContentElement::Type::TABLE;
@@ -1166,19 +1631,46 @@ PageResult DocPipeline::processPage(
                 elem.pageIndex = npuResult.pageIndex;
 
                 try {
-                    elem.html = generateTableHtml(npuResult.tableResult.cells);
+                    elem.html = !npuResult.tableResult.html.empty()
+                                    ? npuResult.tableResult.html
+                                    : generateTableHtml(npuResult.tableResult.cells);
                 } catch (const std::exception& ex) {
                     LOG_WARN("Illegal table structure at page {}: {}",
                              npuResult.pageIndex, ex.what());
-                    tableElements.push_back(makeTableFallbackElement(
-                        npuResult.box, npuResult.pageIndex, "illegal_table_structure"));
-                    continue;
+                    // Wired HTML assembly threw — try SLANet+ as a last
+                    // resort. This fires for genuinely degenerate UNET outputs
+                    // (rowspan overflow, etc). Keeps fallback counts at 0
+                    // when the wireless backend can recover.
+                    if (wirelessRecognizer_) {
+                        TableResult wr = wirelessRecognizer_->recognize(
+                            tableWorkItems[ti].crop,
+                            toWirelessOcrBoxes(npuResult.ocrBoxes));
+                        if (wr.supported && !wr.html.empty()) {
+                            elem.html = wr.html;
+                        }
+                    }
+                    if (elem.html.empty()) {
+                        tableElements.push_back(makeTableFallbackElement(
+                            npuResult.box, npuResult.pageIndex, "illegal_table_structure"));
+                        continue;
+                    }
                 }
 
                 if (elem.html.empty()) {
-                    tableElements.push_back(makeTableFallbackElement(
-                        npuResult.box, npuResult.pageIndex, "empty_table_html"));
-                    continue;
+                    // Retry wireless second-pass if the wired HTML is empty.
+                    if (wirelessRecognizer_) {
+                        TableResult wr = wirelessRecognizer_->recognize(
+                            tableWorkItems[ti].crop,
+                            toWirelessOcrBoxes(npuResult.ocrBoxes));
+                        if (wr.supported && !wr.html.empty()) {
+                            elem.html = wr.html;
+                        }
+                    }
+                    if (elem.html.empty()) {
+                        tableElements.push_back(makeTableFallbackElement(
+                            npuResult.box, npuResult.pageIndex, "empty_table_html"));
+                        continue;
+                    }
                 }
 
                 elem.skipped = false;
@@ -1315,10 +1807,15 @@ void DocPipeline::runDocumentFormulaStage(
     json formulaTrace;
     if (formulaTraceEnabled) {
         formulaTrace = json{
+            {"layout_raw_boxes", json::array()},
+            {"layout_prefilter_boxes", json::array()},
+            {"layout_boxes", json::array()},
             {"raw_candidates", json::array()},
+            {"candidate_refinements", json::array()},
             {"filtered_candidates", json::array()},
             {"crop_mappings", json::array()},
             {"crop_outputs", json::array()},
+            {"batch_profile", json::object()},
             {"timing_bill", json::object()},
             {"summary", json::object()},
         };
@@ -1326,6 +1823,7 @@ void DocPipeline::runDocumentFormulaStage(
 
     const auto regionCollectStart = std::chrono::steady_clock::now();
     int totalEquationRawCount = 0;
+    int totalEquationRefinedCount = 0;
     int totalEquationDropped = 0;
     int totalEquationDroppedContained = 0;
     int totalEquationDroppedFigureContext = 0;
@@ -1338,13 +1836,63 @@ void DocPipeline::runDocumentFormulaStage(
         const auto rawEquationBoxes = pageResult.layoutResult.getEquationBoxes();
         totalEquationRawCount += static_cast<int>(rawEquationBoxes.size());
         if (formulaTraceEnabled) {
+            for (size_t rawIdx = 0; rawIdx < pageResult.layoutResult.rawDebugBoxes.size(); ++rawIdx) {
+                const auto& debug = pageResult.layoutResult.rawDebugBoxes[rawIdx];
+                json rawLayoutBox = layoutBoxTraceJson(debug.box);
+                rawLayoutBox["page"] = pageResult.pageIndex;
+                rawLayoutBox["layout_raw_index"] = static_cast<int>(rawIdx);
+                rawLayoutBox["layout_raw_source_index"] = debug.rawIndex;
+                rawLayoutBox["confidence_threshold"] = debug.confidenceThreshold;
+                rawLayoutBox["passed_confidence_threshold"] =
+                    debug.box.confidence >= debug.confidenceThreshold;
+                rawLayoutBox["shape_class"] = formulaCandidateShapeClass(
+                    debug.box,
+                    pageWidth,
+                    pageHeight);
+                formulaTrace["layout_raw_boxes"].push_back(std::move(rawLayoutBox));
+            }
+            for (size_t preIdx = 0; preIdx < pageResult.layoutResult.prefilterDebugBoxes.size(); ++preIdx) {
+                const auto& debug = pageResult.layoutResult.prefilterDebugBoxes[preIdx];
+                json prefilterLayoutBox = layoutBoxTraceJson(debug.box);
+                prefilterLayoutBox["page"] = pageResult.pageIndex;
+                prefilterLayoutBox["layout_prefilter_index"] = static_cast<int>(preIdx);
+                prefilterLayoutBox["layout_raw_source_index"] = debug.rawIndex;
+                prefilterLayoutBox["confidence_threshold"] = debug.confidenceThreshold;
+                prefilterLayoutBox["shape_class"] = formulaCandidateShapeClass(
+                    debug.box,
+                    pageWidth,
+                    pageHeight);
+                formulaTrace["layout_prefilter_boxes"].push_back(std::move(prefilterLayoutBox));
+            }
+            for (size_t boxIdx = 0; boxIdx < pageResult.layoutResult.boxes.size(); ++boxIdx) {
+                const auto& box = pageResult.layoutResult.boxes[boxIdx];
+                json layoutBox = layoutBoxTraceJson(box);
+                layoutBox["page"] = pageResult.pageIndex;
+                layoutBox["layout_box_index"] = static_cast<int>(boxIdx);
+                layoutBox["shape_class"] = formulaCandidateShapeClass(
+                    box,
+                    pageWidth,
+                    pageHeight);
+                formulaTrace["layout_boxes"].push_back(std::move(layoutBox));
+            }
             for (size_t equationIdx = 0; equationIdx < rawEquationBoxes.size(); ++equationIdx) {
                 json candidate = layoutBoxTraceJson(rawEquationBoxes[equationIdx]);
                 candidate["page"] = pageResult.pageIndex;
                 candidate["raw_candidate_index"] = static_cast<int>(equationIdx);
+                candidate["shape_class"] = formulaCandidateShapeClass(
+                    rawEquationBoxes[equationIdx],
+                    pageWidth,
+                    pageHeight);
                 formulaTrace["raw_candidates"].push_back(std::move(candidate));
             }
         }
+        const auto refinedEquationBoxes = refineFormulaCandidatesConservative(
+            rawEquationBoxes,
+            pageResult.pageIndex,
+            pageWidth,
+            pageHeight,
+            formulaTraceEnabled ? &formulaTrace : nullptr);
+        totalEquationRefinedCount += static_cast<int>(refinedEquationBoxes.size());
 
         std::vector<cv::Rect> figureRois;
         std::vector<cv::Rect> figureCaptionRois;
@@ -1381,26 +1929,30 @@ void DocPipeline::runDocumentFormulaStage(
             }
         }
 
-        std::vector<bool> containedMask(rawEquationBoxes.size(), false);
+        std::vector<bool> containedMask(refinedEquationBoxes.size(), false);
         if (filterContainedEnabled) {
             containedMask = buildContainedEquationMask(
-                rawEquationBoxes,
+                refinedEquationBoxes,
                 pageWidth,
                 pageHeight);
         }
 
         std::vector<LayoutBox> filteredEquationBoxes;
-        filteredEquationBoxes.reserve(rawEquationBoxes.size());
+        filteredEquationBoxes.reserve(refinedEquationBoxes.size());
         int droppedOnPage = 0;
         int droppedContainedOnPage = 0;
         int droppedFigureCtxOnPage = 0;
-        for (size_t equationIdx = 0; equationIdx < rawEquationBoxes.size(); ++equationIdx) {
-            const auto& equationBox = rawEquationBoxes[equationIdx];
+        for (size_t equationIdx = 0; equationIdx < refinedEquationBoxes.size(); ++equationIdx) {
+            const auto& equationBox = refinedEquationBoxes[equationIdx];
             if (formulaTraceEnabled) {
                 json candidate = layoutBoxTraceJson(equationBox);
                 candidate["page"] = pageResult.pageIndex;
-                candidate["raw_candidate_index"] = static_cast<int>(equationIdx);
+                candidate["refined_candidate_index"] = static_cast<int>(equationIdx);
                 candidate["filtered_candidate_index"] = -1;
+                candidate["shape_class"] = formulaCandidateShapeClass(
+                    equationBox,
+                    pageWidth,
+                    pageHeight);
                 candidate["kept"] = false;
                 candidate["drop_reason"] = "unknown";
 
@@ -1507,6 +2059,29 @@ void DocPipeline::runDocumentFormulaStage(
         std::chrono::duration<double, std::milli>(cropPrepareEnd - cropPrepareStart).count();
     result.formulaTimingBill.cropCount = static_cast<int>(allCrops.size());
 
+    const char* dumpCropsDirRaw = std::getenv("RAPIDDOC_FORMULA_DUMP_CROPS_DIR");
+    if (dumpCropsDirRaw != nullptr && dumpCropsDirRaw[0] != '\0' && !allCrops.empty()) {
+        const fs::path dumpRoot(dumpCropsDirRaw);
+        std::error_code ec;
+        fs::create_directories(dumpRoot, ec);
+        if (ec) {
+            LOG_WARN(
+                "RAPIDDOC_FORMULA_DUMP_CROPS_DIR: failed to create {}: {}",
+                dumpRoot.string(),
+                ec.message());
+        } else {
+            for (size_t i = 0; i < allCrops.size(); ++i) {
+                std::ostringstream name;
+                name << "cpp_infer_order_" << std::setw(3) << std::setfill('0') << i << ".png";
+                const fs::path outPath = dumpRoot / name.str();
+                if (!cv::imwrite(outPath.string(), allCrops[i])) {
+                    LOG_WARN("Formula crop dump failed: {}", outPath.string());
+                }
+            }
+            LOG_INFO("Dumped {} formula crops to {}", allCrops.size(), dumpRoot.string());
+        }
+    }
+
     std::vector<std::string> latexes(allCrops.size());
     FormulaRecognizer::BatchTiming batchTimingPrimary;
     FormulaRecognizer::BatchTiming batchTimingSecondary;
@@ -1521,6 +2096,14 @@ void DocPipeline::runDocumentFormulaStage(
             batchTimingPrimary.totalMs = batchTimingPrimary.inferMs;
             batchTimingPrimary.cropCount = static_cast<int>(allCrops.size());
             batchTimingPrimary.batchCount = 1;
+            FormulaRecognizer::BatchRecord hookBatch;
+            hookBatch.batchSize = static_cast<int>(allCrops.size());
+            hookBatch.inferMs = batchTimingPrimary.inferMs;
+            hookBatch.cropIndices.reserve(allCrops.size());
+            for (size_t i = 0; i < allCrops.size(); ++i) {
+                hookBatch.cropIndices.push_back(static_cast<int>(i));
+            }
+            batchTimingPrimary.batches.push_back(std::move(hookBatch));
         } else if (formulaRecognizer_ && formulaRecognizer_->isInitialized()) {
             const bool useDualSession =
                 formulaDualSessionEnabled_ &&
@@ -1665,8 +2248,13 @@ void DocPipeline::runDocumentFormulaStage(
             {"crop_count", result.formulaTimingBill.cropCount},
             {"batch_count", result.formulaTimingBill.batchCount},
         };
+        formulaTrace["batch_profile"] = formulaBatchProfileJson(
+            batchTimingPrimary,
+            batchTimingSecondary,
+            formulaMaxBatchSize_);
         formulaTrace["summary"] = json{
             {"raw_candidate_count", totalEquationRawCount},
+            {"refined_candidate_count", totalEquationRefinedCount},
             {"kept_candidate_count",
              std::accumulate(equationCountByPage.begin(), equationCountByPage.end(), 0)},
             {"crop_count", static_cast<int>(allCrops.size())},
@@ -1907,9 +2495,77 @@ std::vector<ContentElement> DocPipeline::runTableRecognition(
 
         cv::Mat tableCrop = image(roi);
 
+        // Env-gated routing dump: persist the table crop before recognition.
+        const char* tableDumpDir = std::getenv("RAPIDDOC_TABLE_DUMP_CROPS_DIR");
+        if (tableDumpDir != nullptr && tableDumpDir[0] != '\0') {
+            const fs::path dumpRoot(tableDumpDir);
+            std::error_code ec;
+            fs::create_directories(dumpRoot, ec);
+            if (!ec) {
+                std::ostringstream name;
+                name << "table_p" << std::setw(3) << std::setfill('0') << pageIndex
+                     << "_" << roi.x << "_" << roi.y
+                     << "_" << (roi.x + roi.width) << "_" << (roi.y + roi.height)
+                     << ".png";
+                const fs::path outPath = dumpRoot / name.str();
+                if (!cv::imwrite(outPath.string(), tableCrop)) {
+                    LOG_WARN("TABLE_ROUTE_TRACE imwrite failed: {}", outPath.string());
+                }
+            } else {
+                LOG_WARN("TABLE_ROUTE_TRACE mkdir {} failed: {}", dumpRoot.string(), ec.message());
+            }
+        }
+
         TableResult tableResult = recognizeTable(tableCrop);
 
-        if (!tableResult.supported) {
+        const char* tableTrace = std::getenv("RAPIDDOC_TABLE_TRACE");
+        if (tableTrace != nullptr && tableTrace[0] != '\0' && tableTrace[0] != '0') {
+            LOG_INFO(
+                "TABLE_ROUTE_TRACE pipeline page={} bbox=[{},{},{},{}] crop={}x{} "
+                "type={} supported={}",
+                pageIndex, roi.x, roi.y, roi.x + roi.width, roi.y + roi.height,
+                tableCrop.cols, tableCrop.rows,
+                (tableResult.type == TableType::WIRED) ? "WIRED"
+                : (tableResult.type == TableType::WIRELESS) ? "WIRELESS"
+                                                            : "UNKNOWN",
+                tableResult.supported ? "true" : "false");
+        }
+
+        // Decide whether to try the wireless (SLANet+) backend. Three cases:
+        //   - classifier routed to WIRELESS → wired path set supported=false;
+        //   - wired backend succeeded but produced zero cells;
+        //   - wired path failed for other reasons (no recovery — we keep the
+        //     legacy unsupported placeholder to preserve behavior).
+        const bool classifiedWireless =
+            (tableResult.type == TableType::WIRELESS) && !tableResult.supported;
+        const bool wiredNoCells =
+            tableResult.supported && tableResult.cells.empty();
+        const bool needsWireless =
+            (classifiedWireless || wiredNoCells) && wirelessRecognizer_;
+
+        // We collect OCR once on the crop: it's reused by either matcher path
+        // (wired cell grid or SLANet+ HTML emitter).
+        std::vector<ocr::PipelineOCRResult> ocrBoxes;
+        if (ctx.stages.enableOcr && (ocrPipeline_ || (ocrSubmitHook_ && ocrFetchHook_))) {
+            const int64_t ocrTaskId = allocateOcrTaskId();
+            if (submitOcrTask(tableCrop.clone(), ocrTaskId)) {
+                bool ok = false;
+                if (!waitForOcrResult(ocrTaskId, ocrBoxes, ok) || !ok) {
+                    ocrBoxes.clear();
+                }
+            }
+        }
+
+        if (needsWireless) {
+            TableResult wr = wirelessRecognizer_->recognize(
+                tableCrop, toWirelessOcrBoxes(ocrBoxes));
+            if (wr.supported && !wr.html.empty()) {
+                tableResult = std::move(wr);
+                tableResult.type = TableType::WIRELESS;
+            }
+        }
+
+        if (!tableResult.supported && tableResult.html.empty()) {
             const std::string reason = (tableResult.type == TableType::WIRELESS)
                                            ? "wireless_table"
                                            : "table_model_unavailable";
@@ -1917,36 +2573,50 @@ std::vector<ContentElement> DocPipeline::runTableRecognition(
             continue;
         }
 
-        if (tableResult.cells.empty()) {
+        if (tableResult.cells.empty() && tableResult.html.empty()) {
             elements.push_back(makeTableFallbackElement(box, pageIndex, "no_cell_table"));
             continue;
         }
 
-        // Match approach (like Python match_ocr_cell):
-        // 1. Run OCR on the FULL table image once
-        // 2. Match each OCR text box to the nearest cell by spatial overlap
-        if (ctx.stages.enableOcr && (ocrPipeline_ || (ocrSubmitHook_ && ocrFetchHook_))) {
-            const int64_t ocrTaskId = allocateOcrTaskId();
-            if (submitOcrTask(tableCrop.clone(), ocrTaskId)) {
-                std::vector<ocr::PipelineOCRResult> ocrBoxes;
-                bool ok = false;
-                if (waitForOcrResult(ocrTaskId, ocrBoxes, ok) && ok && !ocrBoxes.empty()) {
-                    matchTableOcrToCells(tableResult, ocrBoxes);
-                }
-            }
+        // Wired cell-grid OCR matching only when SLANet+ did not already
+        // emit HTML (the wireless matcher consumed OCR boxes directly).
+        if (tableResult.html.empty() && !ocrBoxes.empty()) {
+            matchTableOcrToCells(tableResult, ocrBoxes);
         }
 
         try {
-            elem.html = generateTableHtml(tableResult.cells);
+            elem.html = !tableResult.html.empty()
+                            ? tableResult.html
+                            : generateTableHtml(tableResult.cells);
         } catch (const std::exception& ex) {
             LOG_WARN("Illegal table structure at page {}: {}", pageIndex, ex.what());
-            elements.push_back(makeTableFallbackElement(box, pageIndex, "illegal_table_structure"));
-            continue;
+            if (wirelessRecognizer_) {
+                TableResult wr = wirelessRecognizer_->recognize(
+                    tableCrop, toWirelessOcrBoxes(ocrBoxes));
+                if (wr.supported && !wr.html.empty()) {
+                    elem.html = wr.html;
+                }
+            }
+            if (elem.html.empty()) {
+                elements.push_back(makeTableFallbackElement(
+                    box, pageIndex, "illegal_table_structure"));
+                continue;
+            }
         }
 
         if (elem.html.empty()) {
-            elements.push_back(makeTableFallbackElement(box, pageIndex, "empty_table_html"));
-            continue;
+            if (wirelessRecognizer_) {
+                TableResult wr = wirelessRecognizer_->recognize(
+                    tableCrop, toWirelessOcrBoxes(ocrBoxes));
+                if (wr.supported && !wr.html.empty()) {
+                    elem.html = wr.html;
+                }
+            }
+            if (elem.html.empty()) {
+                elements.push_back(makeTableFallbackElement(
+                    box, pageIndex, "empty_table_html"));
+                continue;
+            }
         }
 
         elem.skipped = false;

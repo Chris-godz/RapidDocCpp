@@ -309,6 +309,42 @@ TEST(Phase1CorrectnessContracts, no_cell_table_returns_defined_fallback) {
     EXPECT_EQ(elems[0].text, "[Unsupported table: no_cell_table]");
 }
 
+// When the wireless backend is enabled AND the hook returns a pre-baked
+// wireless HTML, the pipeline must promote result.html into ContentElement.html
+// instead of running generateTableHtml(cells) (the latter would throw on empty
+// cells). This pins the Phase D invariant: elem.html prefers result.html.
+TEST(Phase1CorrectnessContracts, wireless_result_html_is_promoted_to_content) {
+    auto cfg = makeContractConfig();
+    cfg.stages.enableWiredTable = true;
+    cfg.stages.enableWirelessTable = false;  // no real SLANet+ needed for the hook path
+    cfg.stages.enableOcr = false;
+    DocPipeline pipeline(cfg);
+
+    const std::string kFakeHtml = "<html><body><table><tr><td>stub</td></tr></table></body></html>";
+
+    DocPipelineTestAccess::setTableHooks(pipeline, [&](const cv::Mat&) {
+        TableResult result;
+        result.type = TableType::WIRELESS;
+        result.supported = true;
+        result.html = kFakeHtml;
+        result.cells.clear();  // no cells — pure HTML from wireless backend
+        return result;
+    });
+
+    cv::Mat page(80, 120, CV_8UC3, cv::Scalar::all(255));
+    auto elems = DocPipelineTestAccess::runTableRecognition(
+        pipeline,
+        page,
+        {makeBox(LayoutCategory::TABLE, 5, 5, 70, 60)},
+        2);
+
+    ASSERT_EQ(elems.size(), 1u);
+    const auto& elem = elems.front();
+    EXPECT_FALSE(elem.skipped);
+    EXPECT_EQ(elem.type, ContentElement::Type::TABLE);
+    EXPECT_EQ(elem.html, kFakeHtml);
+}
+
 TEST(Phase1CorrectnessContracts, table_model_missing_fails_initialization) {
     auto cfg = makeContractConfig();
     cfg.stages.enableWiredTable = true;
@@ -511,16 +547,84 @@ TEST(Phase1CorrectnessContracts, formula_trace_sidecar_contains_expected_fields)
 
     ASSERT_FALSE(doc.formulaTraceJson.empty());
     const json trace = json::parse(doc.formulaTraceJson);
+    ASSERT_TRUE(trace.contains("layout_raw_boxes"));
+    ASSERT_TRUE(trace.contains("layout_prefilter_boxes"));
+    ASSERT_TRUE(trace.contains("layout_boxes"));
     ASSERT_TRUE(trace.contains("raw_candidates"));
+    ASSERT_TRUE(trace.contains("candidate_refinements"));
     ASSERT_TRUE(trace.contains("filtered_candidates"));
     ASSERT_TRUE(trace.contains("crop_mappings"));
     ASSERT_TRUE(trace.contains("crop_outputs"));
+    ASSERT_TRUE(trace.contains("batch_profile"));
     ASSERT_TRUE(trace.contains("timing_bill"));
+    EXPECT_EQ(trace.at("layout_raw_boxes").size(), 0u);
+    EXPECT_EQ(trace.at("layout_prefilter_boxes").size(), 0u);
     EXPECT_EQ(trace.at("raw_candidates").size(), 2u);
+    EXPECT_EQ(trace.at("layout_boxes").size(), 2u);
     EXPECT_EQ(trace.at("crop_mappings").size(), 2u);
     EXPECT_EQ(trace.at("crop_outputs").size(), 2u);
     EXPECT_EQ(trace.at("crop_outputs").at(0).value("latex", ""), "\\alpha+\\beta");
+    EXPECT_EQ(trace.at("batch_profile").value("configured_batch_size", 0), 8);
+    EXPECT_EQ(trace.at("batch_profile").value("max_effective_batch_size", 0), 2);
+    ASSERT_TRUE(trace.at("batch_profile").contains("batches"));
+    ASSERT_EQ(trace.at("batch_profile").at("batches").size(), 1u);
     EXPECT_TRUE(trace.at("timing_bill").contains("infer_ms"));
+
+    if (previousRaw == nullptr) {
+        ::unsetenv(kTraceEnv);
+    } else {
+        ASSERT_EQ(::setenv(kTraceEnv, previousValue.c_str(), 1), 0);
+    }
+}
+
+TEST(Phase1CorrectnessContracts, formula_trace_records_conservative_fragment_merge) {
+    constexpr const char* kTraceEnv = "RAPIDDOC_FORMULA_TRACE";
+    const char* previousRaw = std::getenv(kTraceEnv);
+    const std::string previousValue = previousRaw == nullptr ? std::string() : std::string(previousRaw);
+    ASSERT_EQ(::setenv(kTraceEnv, "1", 1), 0);
+
+    auto cfg = makeContractConfig();
+    cfg.stages.enableFormula = true;
+    DocPipeline pipeline(cfg);
+
+    DocPipelineTestAccess::setFormulaHook(
+        pipeline,
+        [](const std::vector<cv::Mat>& crops) {
+            std::vector<std::string> outputs(crops.size());
+            for (size_t i = 0; i < crops.size(); ++i) {
+                outputs[i] = "latex_" + std::to_string(i);
+            }
+            return outputs;
+        });
+
+    PageImage pageImage;
+    pageImage.image = cv::Mat(180, 900, CV_8UC3, cv::Scalar::all(255));
+    pageImage.pageIndex = 0;
+
+    PageResult pageResult;
+    pageResult.pageIndex = 0;
+    pageResult.pageWidth = pageImage.image.cols;
+    pageResult.pageHeight = pageImage.image.rows;
+    pageResult.layoutResult.boxes = {
+        makeBox(LayoutCategory::EQUATION, 10, 40, 140, 70),
+        makeBox(LayoutCategory::EQUATION, 160, 42, 290, 72),
+        makeBox(LayoutCategory::EQUATION, 10, 120, 80, 150),
+    };
+
+    DocumentResult doc;
+    doc.pages.push_back(pageResult);
+
+    DocPipelineTestAccess::runDocumentFormulaStage(pipeline, {pageImage}, doc);
+
+    const json trace = json::parse(doc.formulaTraceJson);
+    EXPECT_EQ(trace.at("summary").value("raw_candidate_count", 0), 3);
+    EXPECT_EQ(trace.at("summary").value("refined_candidate_count", 0), 2);
+    EXPECT_EQ(trace.at("summary").value("kept_candidate_count", 0), 2);
+    ASSERT_EQ(trace.at("candidate_refinements").size(), 1u);
+    EXPECT_EQ(
+        trace.at("candidate_refinements").at(0).value("action", ""),
+        "merge_same_line_fragments");
+    EXPECT_EQ(trace.at("crop_outputs").size(), 2u);
 
     if (previousRaw == nullptr) {
         ::unsetenv(kTraceEnv);

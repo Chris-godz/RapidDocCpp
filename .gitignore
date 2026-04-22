@@ -31,6 +31,8 @@ engine/model_files/**/*.onnx
 # Temp
 .temp/
 output/
+output-benchmark/
+demo/output-gradio/
 logs/
 test/fixtures/e2e/
 !/src/output/

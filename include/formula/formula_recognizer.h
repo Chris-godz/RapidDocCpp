@@ -22,10 +22,19 @@ struct FormulaRecognizerConfig {
     bool sequentialExecution = false;
     bool enableCpuMemArena = false;
     int maxBatchSize = 1;
+    bool packDynamicShapes = true;
 };
 
 class FormulaRecognizer {
 public:
+    struct BatchRecord {
+        int batchSize = 0;
+        int targetH = 0;
+        int targetW = 0;
+        double inferMs = 0.0;
+        std::vector<int> cropIndices;
+    };
+
     struct BatchTiming {
         double preprocessMs = 0.0;
         double inferMs = 0.0;
@@ -34,6 +43,7 @@ public:
         double totalMs = 0.0;
         int cropCount = 0;
         int batchCount = 0;
+        std::vector<BatchRecord> batches;
     };
 
     explicit FormulaRecognizer(const FormulaRecognizerConfig& config);
