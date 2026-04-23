@@ -62,6 +62,57 @@ static const std::unordered_map<int, float> kPerCategoryConfThres = {
     {22, 0.5f},  // aside_text
 };
 
+constexpr int kFormulaClsId = 7;
+constexpr float kFormulaCompactRescueThreshold = 0.25f;
+constexpr float kFormulaCompactRescueMaxWidth = 80.0f;
+constexpr float kFormulaCompactRescueMaxHeight = 40.0f;
+constexpr float kFormulaMediumMinWidth = 95.0f;
+constexpr float kFormulaMediumMaxWidth = 140.0f;
+constexpr float kFormulaMediumMaxHeight = 40.0f;
+constexpr float kFormulaIsolatedThreshold = 0.60f;
+constexpr float kFormulaNarrowRescueThreshold = 0.10f;
+constexpr float kFormulaNarrowRescueMaxWidth = 35.0f;
+constexpr float kFormulaNarrowRescueMinHeight = 28.0f;
+constexpr float kFormulaNarrowRescueMaxHeight = 40.0f;
+constexpr float kFormulaNarrowSupportIou = 0.5f;
+constexpr float kFormulaPartnerMinConfidence = 0.25f;
+constexpr float kFormulaPartnerMinWidth = 45.0f;
+constexpr float kFormulaPartnerMaxWidth = 70.0f;
+constexpr float kFormulaPartnerIouMin = 0.35f;
+constexpr float kFormulaPartnerIouMax = 0.70f;
+constexpr float kFormulaPartnerAlignTolerance = 12.0f;
+constexpr float kFormulaPartnerExtensionMin = 45.0f;
+
+// Round-1 surgical rescues (profile-specific, not globals).
+// Wide-extension rescue: a wide formula raw that right-extends a passed formula raw on the same row.
+constexpr float kFormulaWideExtensionMinWidth = 200.0f;
+constexpr float kFormulaWideExtensionMaxWidth = 400.0f;
+constexpr float kFormulaWideExtensionMinHeight = 25.0f;
+constexpr float kFormulaWideExtensionMaxHeight = 45.0f;
+constexpr float kFormulaWideExtensionScoreFloor = 0.18f;
+constexpr float kFormulaWideExtensionSeedMinScore = 0.50f;
+constexpr float kFormulaWideExtensionLeftTolerance = 6.0f;
+constexpr float kFormulaWideExtensionMinRightExtensionPx = 40.0f;
+constexpr float kFormulaWideExtensionRowYTolerance = 4.0f;
+
+// Narrow-sibling rescue: a narrow formula raw that is the mirror of an already-rescued narrow sibling.
+constexpr float kFormulaNarrowSiblingMinWidth = 28.0f;
+constexpr float kFormulaNarrowSiblingMaxWidth = 40.0f;
+constexpr float kFormulaNarrowSiblingMinHeight = 30.0f;
+constexpr float kFormulaNarrowSiblingMaxHeight = 40.0f;
+constexpr float kFormulaNarrowSiblingScoreFloor = 0.03f;
+constexpr float kFormulaNarrowSiblingMinIou = 0.50f;
+constexpr float kFormulaNarrowSiblingPartnerScore = 0.10f;
+
+// Round-2 surgical NMS guard: container-over-contained suppressor.
+// When a formula raw A tightly contains a narrower formula raw B on the same row,
+// with small score delta, prefer B (the inline-sized candidate) over A.
+constexpr float kFormulaContainerOverInlineMinIou = 0.60f;
+constexpr float kFormulaContainerOverInlineMaxWidthRatio = 0.85f;
+constexpr float kFormulaContainerOverInlineMaxScoreDelta = 0.10f;
+constexpr float kFormulaContainerOverInlineEdgeTolerance = 6.0f;
+constexpr float kFormulaContainerOverInlineInnerMinScore = 0.30f;
+
 // Map DXEngine label string -> LayoutCategory enum
 static LayoutCategory labelToCategory(const std::string& label) {
     if (label == "text" || label == "content" || label == "reference" ||
@@ -91,6 +142,212 @@ static LayoutCategory labelToCategory(const std::string& label) {
     return LayoutCategory::UNKNOWN;
 }
 
+static LayoutDebugBox makeLayoutDebugBox(
+    const float* row,
+    int rawIndex,
+    float threshold,
+    const cv::Size& imShape)
+{
+    const int clsId = static_cast<int>(row[0]);
+    const float xmin = std::max(0.0f, row[2]);
+    const float ymin = std::max(0.0f, row[3]);
+    const float xmax = std::min(static_cast<float>(imShape.width), row[4]);
+    const float ymax = std::min(static_cast<float>(imShape.height), row[5]);
+    std::string label = (clsId >= 0 && clsId < static_cast<int>(kDxEngineLabels.size()))
+                        ? kDxEngineLabels[clsId]
+                        : "unknown";
+
+    LayoutDebugBox debug;
+    debug.rawIndex = rawIndex;
+    debug.confidenceThreshold = threshold;
+    debug.box.x0 = xmin;
+    debug.box.y0 = ymin;
+    debug.box.x1 = xmax;
+    debug.box.y1 = ymax;
+    debug.box.category = labelToCategory(label);
+    debug.box.confidence = row[1];
+    debug.box.index = rawIndex;
+    debug.box.clsId = clsId;
+    debug.box.label = label;
+    return debug;
+}
+
+static bool isCompactFormulaRescueBox(const float* row) {
+    const float width = row[4] - row[2];
+    const float height = row[5] - row[3];
+    return width > 0.0f &&
+           height > 0.0f &&
+           width <= kFormulaCompactRescueMaxWidth &&
+           height <= kFormulaCompactRescueMaxHeight;
+}
+
+static bool isMediumFormulaBox(const float* row) {
+    const float width = row[4] - row[2];
+    const float height = row[5] - row[3];
+    return width >= kFormulaMediumMinWidth &&
+           width <= kFormulaMediumMaxWidth &&
+           height > 0.0f &&
+           height <= kFormulaMediumMaxHeight;
+}
+
+static bool isMediumFormulaBox(const std::vector<float>& box) {
+    if (box.size() < 6) {
+        return false;
+    }
+    const float width = box[4] - box[2];
+    const float height = box[5] - box[3];
+    return width >= kFormulaMediumMinWidth &&
+           width <= kFormulaMediumMaxWidth &&
+           height > 0.0f &&
+           height <= kFormulaMediumMaxHeight;
+}
+
+static bool isNarrowFormulaRescueBox(const float* row) {
+    const float width = row[4] - row[2];
+    const float height = row[5] - row[3];
+    return width > 0.0f &&
+           height >= kFormulaNarrowRescueMinHeight &&
+           width <= kFormulaNarrowRescueMaxWidth &&
+           height <= kFormulaNarrowRescueMaxHeight;
+}
+
+static float computeIoU(const float* a, const float* b);
+
+static bool hasFormulaSupportingNeighbor(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes);
+
+static bool hasQualifiedRightFormulaPartner(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes);
+
+static bool hasQualifiedLeftFormulaPartner(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes);
+
+static bool isQualifiedRightFormulaPartner(
+    const float* container,
+    const float* fragment);
+
+static bool isQualifiedLeftFormulaPartner(
+    const float* container,
+    const float* fragment);
+
+static bool isWideExtensionRescueBox(const float* row) {
+    const float width = row[4] - row[2];
+    const float height = row[5] - row[3];
+    return width >= kFormulaWideExtensionMinWidth &&
+           width <= kFormulaWideExtensionMaxWidth &&
+           height >= kFormulaWideExtensionMinHeight &&
+           height <= kFormulaWideExtensionMaxHeight;
+}
+
+static bool hasPassedFormulaSeedExtendedOnRight(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes)
+{
+    const float rowX0 = row[2];
+    const float rowY0 = row[3];
+    const float rowX1 = row[4];
+    const float rowY1 = row[5];
+    for (int i = 0; i < totalBoxes; ++i) {
+        if (i == rowIndex) continue;
+        const float* other = boxData + i * 6;
+        if (static_cast<int>(other[0]) != kFormulaClsId) continue;
+        if (other[1] < kFormulaWideExtensionSeedMinScore) continue;
+        const float seedX0 = other[2];
+        const float seedY0 = other[3];
+        const float seedX1 = other[4];
+        const float seedY1 = other[5];
+        if (std::fabs(seedX0 - rowX0) > kFormulaWideExtensionLeftTolerance) continue;
+        if (std::fabs(seedY0 - rowY0) > kFormulaWideExtensionRowYTolerance) continue;
+        if (std::fabs(seedY1 - rowY1) > kFormulaWideExtensionRowYTolerance) continue;
+        if (seedX1 >= rowX1) continue;
+        if ((rowX1 - seedX1) < kFormulaWideExtensionMinRightExtensionPx) continue;
+        return true;
+    }
+    return false;
+}
+
+static bool isNarrowSiblingRescueBox(const float* row) {
+    const float width = row[4] - row[2];
+    const float height = row[5] - row[3];
+    return width >= kFormulaNarrowSiblingMinWidth &&
+           width <= kFormulaNarrowSiblingMaxWidth &&
+           height >= kFormulaNarrowSiblingMinHeight &&
+           height <= kFormulaNarrowSiblingMaxHeight;
+}
+
+static bool hasPassedNarrowFormulaSibling(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes)
+{
+    for (int i = 0; i < totalBoxes; ++i) {
+        if (i == rowIndex) continue;
+        const float* other = boxData + i * 6;
+        if (static_cast<int>(other[0]) != kFormulaClsId) continue;
+        if (other[1] < kFormulaNarrowSiblingPartnerScore) continue;
+        if (!isNarrowFormulaRescueBox(other)) continue;
+        if (computeIoU(row + 2, other + 2) < kFormulaNarrowSiblingMinIou) continue;
+        return true;
+    }
+    return false;
+}
+
+static float effectiveConfidenceThreshold(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes)
+{
+    const int clsId = static_cast<int>(row[0]);
+    const auto it = kPerCategoryConfThres.find(clsId);
+    float threshold = (it != kPerCategoryConfThres.end()) ? it->second : 0.5f;
+    if (clsId != kFormulaClsId) {
+        return threshold;
+    }
+    if (isMediumFormulaBox(row)) {
+        const bool hasRightPartner =
+            hasQualifiedRightFormulaPartner(row, rowIndex, boxData, totalBoxes);
+        const bool hasLeftPartner =
+            hasQualifiedLeftFormulaPartner(row, rowIndex, boxData, totalBoxes);
+        if (hasRightPartner && !hasLeftPartner) {
+            threshold = std::min(threshold, kFormulaCompactRescueThreshold);
+        } else if (!hasRightPartner && !hasLeftPartner) {
+            threshold = std::max(threshold, kFormulaIsolatedThreshold);
+        }
+    }
+    if (isCompactFormulaRescueBox(row)) {
+        threshold = std::min(threshold, kFormulaCompactRescueThreshold);
+    }
+    if (row[1] >= kFormulaNarrowRescueThreshold &&
+        isNarrowFormulaRescueBox(row) &&
+        hasFormulaSupportingNeighbor(row, rowIndex, boxData, totalBoxes)) {
+        threshold = std::min(threshold, kFormulaNarrowRescueThreshold);
+    }
+    if (row[1] >= kFormulaWideExtensionScoreFloor &&
+        isWideExtensionRescueBox(row) &&
+        hasPassedFormulaSeedExtendedOnRight(row, rowIndex, boxData, totalBoxes)) {
+        threshold = std::min(threshold, kFormulaWideExtensionScoreFloor);
+    }
+    if (row[1] >= kFormulaNarrowSiblingScoreFloor &&
+        isNarrowSiblingRescueBox(row) &&
+        hasPassedNarrowFormulaSibling(row, rowIndex, boxData, totalBoxes)) {
+        threshold = std::min(threshold, kFormulaNarrowSiblingScoreFloor);
+    }
+    return threshold;
+}
+
 // ---------------------------------------------------------------------------
 // IoU helpers (matches Python post_process.py iou())
 // ---------------------------------------------------------------------------
@@ -103,6 +360,289 @@ static float computeIoU(const float* a, const float* b) {
     float area1 = (a[2] - a[0] + 1) * (a[3] - a[1] + 1);
     float area2 = (b[2] - b[0] + 1) * (b[3] - b[1] + 1);
     return interArea / (area1 + area2 - interArea);
+}
+
+static bool hasFormulaSupportingNeighbor(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes)
+{
+    for (int i = 0; i < totalBoxes; ++i) {
+        if (i == rowIndex) {
+            continue;
+        }
+        const float* other = boxData + i * 6;
+        if (static_cast<int>(other[0]) != kFormulaClsId) {
+            continue;
+        }
+        if (computeIoU(row + 2, other + 2) >= kFormulaNarrowSupportIou) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool isQualifiedRightFormulaPartner(
+    const float* container,
+    const float* fragment)
+{
+    if (container == nullptr || fragment == nullptr) {
+        return false;
+    }
+    if (static_cast<int>(container[0]) != kFormulaClsId ||
+        static_cast<int>(fragment[0]) != kFormulaClsId) {
+        return false;
+    }
+    if (!isMediumFormulaBox(container)) {
+        return false;
+    }
+    const float containerWidth = container[4] - container[2];
+    const float containerHeight = container[5] - container[3];
+    const float fragmentWidth = fragment[4] - fragment[2];
+    const float fragmentHeight = fragment[5] - fragment[3];
+    if (fragmentWidth < kFormulaPartnerMinWidth ||
+        fragmentWidth > kFormulaPartnerMaxWidth ||
+        containerWidth <= fragmentWidth ||
+        containerHeight <= 0.0f ||
+        fragmentHeight <= 0.0f ||
+        std::fabs(containerHeight - fragmentHeight) > 8.0f) {
+        return false;
+    }
+    const float overlap = computeIoU(container + 2, fragment + 2);
+    if (overlap < kFormulaPartnerIouMin ||
+        overlap > kFormulaPartnerIouMax) {
+        return false;
+    }
+    const float rightGap = std::fabs(container[4] - fragment[4]);
+    const float leftExtension = fragment[2] - container[2];
+    return rightGap <= kFormulaPartnerAlignTolerance &&
+           leftExtension >= kFormulaPartnerExtensionMin;
+}
+
+static bool isQualifiedLeftFormulaPartner(
+    const float* container,
+    const float* fragment)
+{
+    if (container == nullptr || fragment == nullptr) {
+        return false;
+    }
+    if (static_cast<int>(container[0]) != kFormulaClsId ||
+        static_cast<int>(fragment[0]) != kFormulaClsId) {
+        return false;
+    }
+    if (!isMediumFormulaBox(container)) {
+        return false;
+    }
+    const float containerWidth = container[4] - container[2];
+    const float containerHeight = container[5] - container[3];
+    const float fragmentWidth = fragment[4] - fragment[2];
+    const float fragmentHeight = fragment[5] - fragment[3];
+    if (fragmentWidth < kFormulaPartnerMinWidth ||
+        fragmentWidth > kFormulaPartnerMaxWidth ||
+        containerWidth <= fragmentWidth ||
+        containerHeight <= 0.0f ||
+        fragmentHeight <= 0.0f ||
+        std::fabs(containerHeight - fragmentHeight) > 8.0f) {
+        return false;
+    }
+    const float overlap = computeIoU(container + 2, fragment + 2);
+    if (overlap < kFormulaPartnerIouMin ||
+        overlap > kFormulaPartnerIouMax) {
+        return false;
+    }
+    const float leftGap = std::fabs(container[2] - fragment[2]);
+    const float rightExtension = container[4] - fragment[4];
+    return leftGap <= kFormulaPartnerAlignTolerance &&
+           rightExtension >= kFormulaPartnerExtensionMin;
+}
+
+static bool hasQualifiedRightFormulaPartner(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes)
+{
+    for (int i = 0; i < totalBoxes; ++i) {
+        if (i == rowIndex) {
+            continue;
+        }
+        const float* other = boxData + i * 6;
+        if (other[1] < kFormulaPartnerMinConfidence) {
+            continue;
+        }
+        if (isQualifiedRightFormulaPartner(row, other)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool hasQualifiedLeftFormulaPartner(
+    const float* row,
+    int rowIndex,
+    const float* boxData,
+    int totalBoxes)
+{
+    for (int i = 0; i < totalBoxes; ++i) {
+        if (i == rowIndex) {
+            continue;
+        }
+        const float* other = boxData + i * 6;
+        if (other[1] < kFormulaPartnerMinConfidence) {
+            continue;
+        }
+        if (isQualifiedLeftFormulaPartner(row, other)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void suppressFormulaSuffixFragments(
+    std::vector<std::vector<float>>& rawBoxes)
+{
+    if (rawBoxes.empty()) {
+        return;
+    }
+    std::vector<bool> keep(rawBoxes.size(), true);
+    for (size_t i = 0; i < rawBoxes.size(); ++i) {
+        const auto& container = rawBoxes[i];
+        if (container.size() < 6 ||
+            static_cast<int>(container[0]) != kFormulaClsId ||
+            container[1] < kFormulaCompactRescueThreshold ||
+            !isMediumFormulaBox(container)) {
+            continue;
+        }
+        bool hasLeftPartner = false;
+        std::vector<size_t> rightPartners;
+        for (size_t j = 0; j < rawBoxes.size(); ++j) {
+            if (i == j || !keep[j]) {
+                continue;
+            }
+            const auto& fragment = rawBoxes[j];
+            if (fragment.size() < 6 ||
+                static_cast<int>(fragment[0]) != kFormulaClsId ||
+                fragment[1] < kFormulaPartnerMinConfidence) {
+                continue;
+            }
+            if (isQualifiedLeftFormulaPartner(container.data(), fragment.data())) {
+                hasLeftPartner = true;
+            }
+            if (isQualifiedRightFormulaPartner(container.data(), fragment.data())) {
+                rightPartners.push_back(j);
+            }
+        }
+        if (!hasLeftPartner) {
+            for (size_t idx : rightPartners) {
+                keep[idx] = false;
+            }
+        }
+    }
+    std::vector<std::vector<float>> filtered;
+    filtered.reserve(rawBoxes.size());
+    for (size_t i = 0; i < rawBoxes.size(); ++i) {
+        if (keep[i]) {
+            filtered.push_back(std::move(rawBoxes[i]));
+        }
+    }
+    rawBoxes = std::move(filtered);
+}
+
+// Round-2 guard: when a formula raw A tightly contains a narrower formula raw B
+// with nearly-identical score, drop A so that NMS keeps the inline-sized B.
+// Pattern (py=11 case):
+//   A.x0 <= B.x0, A.x1 >= B.x1, A.y0 ~ B.y0, A.y1 ~ B.y1
+//   B.width / A.width < 0.85
+//   A.score - B.score < 0.10
+//   IoU(A, B) >= 0.60
+// This rule inverts the default NMS choice (higher-score wins) for this
+// specific pattern only; without it, NMS eats the inline-sized B via the
+// container A that drags in extra pixels of surrounding text.
+static void suppressFormulaContainersOverInline(
+    std::vector<std::vector<float>>& rawBoxes)
+{
+    if (rawBoxes.empty()) {
+        return;
+    }
+    std::vector<bool> keep(rawBoxes.size(), true);
+    for (size_t i = 0; i < rawBoxes.size(); ++i) {
+        const auto& A = rawBoxes[i];
+        if (A.size() < 6) {
+            continue;
+        }
+        if (static_cast<int>(A[0]) != kFormulaClsId) {
+            continue;
+        }
+        const float aScore = A[1];
+        const float aX0 = A[2];
+        const float aY0 = A[3];
+        const float aX1 = A[4];
+        const float aY1 = A[5];
+        const float aW = aX1 - aX0;
+        if (aW <= 0.0f) {
+            continue;
+        }
+        for (size_t j = 0; j < rawBoxes.size(); ++j) {
+            if (i == j || !keep[i] || !keep[j]) {
+                continue;
+            }
+            const auto& B = rawBoxes[j];
+            if (B.size() < 6) {
+                continue;
+            }
+            if (static_cast<int>(B[0]) != kFormulaClsId) {
+                continue;
+            }
+            const float bScore = B[1];
+            if (bScore < kFormulaContainerOverInlineInnerMinScore) {
+                continue;
+            }
+            if (aScore <= bScore) {
+                continue;
+            }
+            if (aScore - bScore >= kFormulaContainerOverInlineMaxScoreDelta) {
+                continue;
+            }
+            const float bX0 = B[2];
+            const float bY0 = B[3];
+            const float bX1 = B[4];
+            const float bY1 = B[5];
+            const float bW = bX1 - bX0;
+            if (bW <= 0.0f) {
+                continue;
+            }
+            if (bX0 < aX0 - kFormulaContainerOverInlineEdgeTolerance) {
+                continue;
+            }
+            if (bX1 > aX1 + kFormulaContainerOverInlineEdgeTolerance) {
+                continue;
+            }
+            if (bY0 < aY0 - kFormulaContainerOverInlineEdgeTolerance) {
+                continue;
+            }
+            if (bY1 > aY1 + kFormulaContainerOverInlineEdgeTolerance) {
+                continue;
+            }
+            if (bW / aW >= kFormulaContainerOverInlineMaxWidthRatio) {
+                continue;
+            }
+            if (computeIoU(A.data() + 2, B.data() + 2) <
+                kFormulaContainerOverInlineMinIou) {
+                continue;
+            }
+            keep[i] = false;
+            break;
+        }
+    }
+    std::vector<std::vector<float>> filtered;
+    filtered.reserve(rawBoxes.size());
+    for (size_t i = 0; i < rawBoxes.size(); ++i) {
+        if (keep[i]) {
+            filtered.push_back(std::move(rawBoxes[i]));
+        }
+    }
+    rawBoxes = std::move(filtered);
 }
 
 // NMS with different IoU thresholds for same/different class (Python nms())
@@ -232,7 +772,9 @@ cv::Mat LayoutDetector::preprocess(const cv::Mat& image, cv::Point2f& scaleFacto
 std::vector<LayoutBox> LayoutDetector::postprocess(
     const std::vector<std::vector<float>>& dxOutputs,
     const cv::Size& imShape,
-    const cv::Point2f& scaleFactor)
+    const cv::Point2f& scaleFactor,
+    std::vector<LayoutDebugBox>* rawDebugBoxes,
+    std::vector<LayoutDebugBox>* prefilterDebugBoxes)
 {
 #ifndef HAS_ONNXRUNTIME
     LOG_WARN("ONNX Runtime not available — cannot run NMS post-processing");
@@ -356,12 +898,27 @@ std::vector<LayoutBox> LayoutDetector::postprocess(
         float score = row[1];
         if (clsId < 0) continue;
 
-        auto it = kPerCategoryConfThres.find(clsId);
-        float threshold = (it != kPerCategoryConfThres.end()) ? it->second : 0.5f;
+        const float threshold =
+            effectiveConfidenceThreshold(row, i, boxData, totalBoxes);
+        if (rawDebugBoxes != nullptr) {
+            LayoutDebugBox debug = makeLayoutDebugBox(row, i, threshold, imShape);
+            if (debug.box.x1 > debug.box.x0 && debug.box.y1 > debug.box.y0) {
+                rawDebugBoxes->push_back(std::move(debug));
+            }
+        }
         if (score < threshold) continue;
 
+        if (prefilterDebugBoxes != nullptr) {
+            LayoutDebugBox debug = makeLayoutDebugBox(row, i, threshold, imShape);
+            if (debug.box.x1 > debug.box.x0 && debug.box.y1 > debug.box.y0) {
+                prefilterDebugBoxes->push_back(std::move(debug));
+            }
+        }
         rawBoxes.push_back({row[0], row[1], row[2], row[3], row[4], row[5]});
     }
+
+    suppressFormulaSuffixFragments(rawBoxes);
+    suppressFormulaContainersOverInline(rawBoxes);
 
     // ---- NMS (same-class IoU=0.6, diff-class IoU=0.98) ----
     auto selected = nms(rawBoxes, 0.6f, 0.98f);
@@ -466,7 +1023,12 @@ LayoutResult LayoutDetector::detect(const cv::Mat& image) {
 
     // 3. Post-process (ONNX NMS + category mapping)
     cv::Size origShape(image.cols, image.rows);
-    result.boxes = postprocess(dxOutputs, origShape, scaleFactor);
+    result.boxes = postprocess(
+        dxOutputs,
+        origShape,
+        scaleFactor,
+        config_.emitDebugBoxes ? &result.rawDebugBoxes : nullptr,
+        config_.emitDebugBoxes ? &result.prefilterDebugBoxes : nullptr);
 
     auto tEnd = std::chrono::steady_clock::now();
     result.inferenceTimeMs =

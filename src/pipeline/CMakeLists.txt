@@ -17,6 +17,7 @@ target_link_libraries(doc_pipeline PUBLIC
     doc_common
     doc_pdf
     doc_layout
+    doc_formula
     doc_table
     doc_reading_order
     doc_output

@@ -19,14 +19,67 @@
 #include "pipeline/doc_pipeline.h"
 #include "common/config.h"
 #include "common/logger.h"
+#include "formula/formula_recognizer.h"
 #include "output/detail_report.h"
+#include <nlohmann/json.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <fstream>
 #include <filesystem>
+#include <vector>
 #include <getopt.h>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+bool envFlagOrDefault(const char* key, bool defaultValue) {
+    const char* raw = std::getenv(key);
+    if (raw == nullptr) {
+        return defaultValue;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (value == "1" || value == "true" || value == "yes" || value == "on") {
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "no" || value == "off") {
+        return false;
+    }
+    return defaultValue;
+}
+
+int envIntOrDefault(const char* key, int defaultValue) {
+    const char* raw = std::getenv(key);
+    if (raw == nullptr || *raw == '\0') {
+        return defaultValue;
+    }
+    try {
+        return std::stoi(raw);
+    } catch (...) {
+        return defaultValue;
+    }
+}
+
+json formulaBatchRecordsToJson(const rapid_doc::FormulaRecognizer::BatchTiming& timing) {
+    json batches = json::array();
+    for (const auto& batch : timing.batches) {
+        batches.push_back({
+            {"batch_size", batch.batchSize},
+            {"target_h", batch.targetH},
+            {"target_w", batch.targetW},
+            {"infer_ms", batch.inferMs},
+            {"crop_indices", batch.cropIndices},
+        });
+    }
+    return batches;
+}
 
 void printUsage(const char* programName) {
     std::cout << "RapidDoc C++ - Document Analysis Pipeline (DEEPX NPU)\n\n";
@@ -44,8 +97,10 @@ void printUsage(const char* programName) {
     std::cout << "  -v, --verbose           Verbose logging\n";
     std::cout << "  -h, --help              Show this help\n";
     std::cout << "\n";
-    std::cout << "Note: Formula recognition and wireless table recognition are not\n";
-    std::cout << "      supported on DEEPX NPU and will be skipped.\n";
+    std::cout << "Note: Formula recognition runs through ONNX Runtime when enabled.\n";
+    std::cout << "      Wireless table recognition is still unsupported on DEEPX NPU.\n";
+    std::cout << "      Set RAPIDDOC_FORMULA_TRACE=1 to emit formula trace sidecar JSON.\n";
+    std::cout << "      Set RAPIDDOC_FORMULA_DUMP_CROPS_DIR=<dir> to save formula input crops (cpp_infer_order_*.png).\n";
 }
 
 struct CliArgs {
@@ -59,6 +114,14 @@ struct CliArgs {
     bool detail = false;
     std::string detailPath;
     bool verbose = false;
+    bool showHelp = false;
+    std::string formulaReplayCropDir;
+    std::string formulaReplayJsonOut;
+    int formulaReplayBatchSize = 1;
+
+    bool isFormulaReplay() const {
+        return !formulaReplayCropDir.empty() || !formulaReplayJsonOut.empty();
+    }
 };
 
 enum LongOnlyOpt {
@@ -67,6 +130,9 @@ enum LongOnlyOpt {
     OPT_JSON_ONLY,
     OPT_DETAIL,
     OPT_DETAIL_FILE,
+    OPT_FORMULA_REPLAY_CROP_DIR,
+    OPT_FORMULA_REPLAY_JSON_OUT,
+    OPT_FORMULA_REPLAY_BATCH_SIZE,
 };
 
 bool parseArgs(int argc, char* argv[], CliArgs& args) {
@@ -80,6 +146,9 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
         {"json-only", no_argument,       nullptr, OPT_JSON_ONLY},
         {"detail",    no_argument,       nullptr, OPT_DETAIL},
         {"detail-file", required_argument, nullptr, OPT_DETAIL_FILE},
+        {"formula-replay-crop-dir", required_argument, nullptr, OPT_FORMULA_REPLAY_CROP_DIR},
+        {"formula-replay-json-out", required_argument, nullptr, OPT_FORMULA_REPLAY_JSON_OUT},
+        {"formula-replay-batch-size", required_argument, nullptr, OPT_FORMULA_REPLAY_BATCH_SIZE},
         {"verbose",   no_argument,       nullptr, 'v'},
         {"help",      no_argument,       nullptr, 'h'},
         {nullptr,     0,                 nullptr, 0}
@@ -97,10 +166,32 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
             case OPT_JSON_ONLY: args.jsonOnly = true; break;
             case OPT_DETAIL: args.detail = true; break;
             case OPT_DETAIL_FILE: args.detailPath = optarg; break;
+            case OPT_FORMULA_REPLAY_CROP_DIR: args.formulaReplayCropDir = optarg; break;
+            case OPT_FORMULA_REPLAY_JSON_OUT: args.formulaReplayJsonOut = optarg; break;
+            case OPT_FORMULA_REPLAY_BATCH_SIZE: args.formulaReplayBatchSize = std::atoi(optarg); break;
             case 'v': args.verbose = true; break;
-            case 'h': printUsage(argv[0]); return false;
+            case 'h':
+                printUsage(argv[0]);
+                args.showHelp = true;
+                return false;
             default:  printUsage(argv[0]); return false;
         }
+    }
+
+    if (args.isFormulaReplay()) {
+        if (args.formulaReplayCropDir.empty()) {
+            std::cerr << "Error: --formula-replay-crop-dir is required for formula replay\n";
+            return false;
+        }
+        if (args.formulaReplayJsonOut.empty()) {
+            std::cerr << "Error: --formula-replay-json-out is required for formula replay\n";
+            return false;
+        }
+        if (args.formulaReplayBatchSize <= 0) {
+            std::cerr << "Error: --formula-replay-batch-size must be positive\n";
+            return false;
+        }
+        return true;
     }
 
     if (args.inputPath.empty()) {
@@ -112,10 +203,168 @@ bool parseArgs(int argc, char* argv[], CliArgs& args) {
     return true;
 }
 
+bool hasImageExtension(const fs::path& path) {
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+           ext == ".bmp" || ext == ".webp";
+}
+
+std::string resolveFormulaModelPath() {
+    const char* explicitPath = std::getenv("RAPIDDOC_FORMULA_MODEL");
+    if (explicitPath != nullptr && explicitPath[0] != '\0') {
+        return explicitPath;
+    }
+    const char* explicitOnnxPath = std::getenv("RAPIDDOC_FORMULA_ONNX_MODEL");
+    if (explicitOnnxPath != nullptr && explicitOnnxPath[0] != '\0') {
+        return explicitOnnxPath;
+    }
+    return std::string(PROJECT_ROOT_DIR) +
+           "/.download_cache/onnx_models/pp_formulanet_plus_m.onnx";
+}
+
+int runFormulaReplay(const CliArgs& args) {
+    if (!fs::exists(args.formulaReplayCropDir) ||
+        !fs::is_directory(args.formulaReplayCropDir)) {
+        LOG_ERROR("Formula replay crop directory not found: {}", args.formulaReplayCropDir);
+        return 1;
+    }
+
+    std::vector<fs::path> cropPaths;
+    for (const auto& entry : fs::directory_iterator(args.formulaReplayCropDir)) {
+        if (entry.is_regular_file() && hasImageExtension(entry.path())) {
+            cropPaths.push_back(entry.path());
+        }
+    }
+    std::sort(cropPaths.begin(), cropPaths.end());
+    if (cropPaths.empty()) {
+        LOG_ERROR("Formula replay crop directory contains no supported images: {}",
+                  args.formulaReplayCropDir);
+        return 1;
+    }
+
+    std::vector<cv::Mat> crops;
+    crops.reserve(cropPaths.size());
+    json cropInputs = json::array();
+    for (size_t i = 0; i < cropPaths.size(); ++i) {
+        cv::Mat image = cv::imread(cropPaths[i].string(), cv::IMREAD_COLOR);
+        if (image.empty()) {
+            LOG_ERROR("Failed to read formula replay crop: {}", cropPaths[i].string());
+            return 1;
+        }
+        cropInputs.push_back({
+            {"index", i},
+            {"filename", cropPaths[i].filename().string()},
+            {"path", fs::absolute(cropPaths[i]).string()},
+            {"width", image.cols},
+            {"height", image.rows},
+        });
+        crops.push_back(std::move(image));
+    }
+
+    const std::string modelPath = resolveFormulaModelPath();
+    rapid_doc::FormulaRecognizerConfig config;
+    config.onnxModelPath = modelPath;
+    config.inputSize = 384;
+    config.enableCpuMemArena =
+        envFlagOrDefault("RAPIDDOC_FORMULA_CPU_MEM_ARENA", true);
+    config.maxBatchSize = args.formulaReplayBatchSize;
+    config.packDynamicShapes =
+        envFlagOrDefault("RAPIDDOC_FORMULA_PACK_DYNAMIC_SHAPES", true);
+    const char* ortProfileRaw = std::getenv("RAPIDDOC_FORMULA_ORT_PROFILE");
+    const std::string ortProfile = ortProfileRaw == nullptr ? "" : std::string(ortProfileRaw);
+    if (ortProfile == "constrained") {
+        config.sequentialExecution = true;
+        config.intraOpThreads = 1;
+        config.interOpThreads = 1;
+    } else if (ortProfile == "sequential") {
+        config.sequentialExecution = true;
+    }
+    const int intraThreads = envIntOrDefault("RAPIDDOC_FORMULA_ORT_INTRA_THREADS", -1);
+    const int interThreads = envIntOrDefault("RAPIDDOC_FORMULA_ORT_INTER_THREADS", -1);
+    if (intraThreads > 0) {
+        config.intraOpThreads = intraThreads;
+    }
+    if (interThreads > 0) {
+        config.interOpThreads = interThreads;
+    }
+
+    rapid_doc::FormulaRecognizer recognizer(config);
+    if (!recognizer.initialize()) {
+        LOG_ERROR("Failed to initialize formula recognizer for replay");
+        return 1;
+    }
+
+    rapid_doc::FormulaRecognizer::BatchTiming timing;
+    const auto replayStart = std::chrono::steady_clock::now();
+    const std::vector<std::string> latexes = recognizer.recognizeBatch(crops, &timing);
+    const auto replayEnd = std::chrono::steady_clock::now();
+
+    json outputs = json::array();
+    for (size_t i = 0; i < latexes.size(); ++i) {
+        outputs.push_back({
+            {"index", i},
+            {"filename", cropPaths[i].filename().string()},
+            {"latex", latexes[i]},
+        });
+    }
+
+    const double wallMs =
+        std::chrono::duration<double, std::milli>(replayEnd - replayStart).count();
+    json result = {
+        {"mode", "formula_replay"},
+        {"crop_dir", fs::absolute(args.formulaReplayCropDir).string()},
+        {"crop_count", static_cast<int>(cropPaths.size())},
+        {"batch_size", args.formulaReplayBatchSize},
+        {"dynamic_shape_packing", config.packDynamicShapes},
+        {"cpu_mem_arena", config.enableCpuMemArena},
+        {"ort_profile", ortProfile.empty() ? "default" : ortProfile},
+        {"ort_intra_threads", config.intraOpThreads},
+        {"ort_inter_threads", config.interOpThreads},
+        {"model_path", fs::absolute(modelPath).string()},
+        {"pure_infer_ms", timing.inferMs},
+        {"avg_infer_ms_per_crop",
+         timing.cropCount > 0 ? timing.inferMs / static_cast<double>(timing.cropCount) : 0.0},
+        {"preprocess_ms", timing.preprocessMs},
+        {"decode_ms", timing.decodeMs},
+        {"normalize_ms", timing.normalizeMs},
+        {"total_ms", timing.totalMs},
+        {"wall_ms", wallMs},
+        {"timing", {
+            {"preprocess_ms", timing.preprocessMs},
+            {"infer_ms", timing.inferMs},
+            {"decode_ms", timing.decodeMs},
+            {"normalize_ms", timing.normalizeMs},
+            {"total_ms", timing.totalMs},
+            {"crop_count", timing.cropCount},
+            {"batch_count", timing.batchCount},
+            {"batches", formulaBatchRecordsToJson(timing)},
+        }},
+        {"crops", std::move(cropInputs)},
+        {"outputs", std::move(outputs)},
+    };
+
+    fs::path jsonOutPath(args.formulaReplayJsonOut);
+    if (!jsonOutPath.parent_path().empty()) {
+        fs::create_directories(jsonOutPath.parent_path());
+    }
+    std::ofstream out(jsonOutPath);
+    if (!out) {
+        LOG_ERROR("Failed to open formula replay JSON output: {}", args.formulaReplayJsonOut);
+        return 1;
+    }
+    out << result.dump(2) << "\n";
+    LOG_INFO("Saved Formula replay JSON: {}", args.formulaReplayJsonOut);
+    std::cout << result.dump(2) << "\n";
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     CliArgs args;
     if (!parseArgs(argc, argv, args)) {
-        return 1;
+        return args.showHelp ? 0 : 1;
     }
 
     // Set log level
@@ -123,6 +372,10 @@ int main(int argc, char* argv[]) {
         spdlog::set_level(spdlog::level::debug);
     } else {
         spdlog::set_level(spdlog::level::info);
+    }
+
+    if (args.isFormulaReplay()) {
+        return runFormulaReplay(args);
     }
 
     // Check input file exists
@@ -178,6 +431,13 @@ int main(int argc, char* argv[]) {
         std::ofstream jsonFile(jsonPath);
         jsonFile << result.contentListJson;
         LOG_INFO("Saved JSON: {}", jsonPath);
+    }
+
+    if (!result.formulaTraceJson.empty()) {
+        std::string tracePath = args.outputDir + "/" + baseName + "_formula_trace.json";
+        std::ofstream traceFile(tracePath);
+        traceFile << result.formulaTraceJson;
+        LOG_INFO("Saved Formula trace sidecar: {}", tracePath);
     }
 
     if (args.detail) {

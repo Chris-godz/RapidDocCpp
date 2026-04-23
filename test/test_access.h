@@ -39,6 +39,17 @@ public:
         pipeline.tableHtmlHook_ = {};
     }
 
+    static void setFormulaHook(
+        DocPipeline& pipeline,
+        std::function<std::vector<std::string>(const std::vector<cv::Mat>&)> recognizeHook)
+    {
+        pipeline.formulaRecognizeHook_ = std::move(recognizeHook);
+    }
+
+    static void clearFormulaHook(DocPipeline& pipeline) {
+        pipeline.formulaRecognizeHook_ = {};
+    }
+
     static void setOcrTimeout(DocPipeline& pipeline, std::chrono::milliseconds timeout) {
         if (timeout.count() <= 0) {
             pipeline.ocrWaitTimeout_ = std::chrono::milliseconds(1);
@@ -75,6 +86,24 @@ public:
         int pageIndex)
     {
         return pipeline.handleUnsupportedElements(unsupportedBoxes, pageIndex);
+    }
+
+    static std::vector<ContentElement> runFormulaRecognition(
+        DocPipeline& pipeline,
+        const cv::Mat& image,
+        const std::vector<LayoutBox>& equationBoxes,
+        int pageIndex)
+    {
+        return pipeline.runFormulaRecognition(image, equationBoxes, pageIndex);
+    }
+
+    static void runDocumentFormulaStage(
+        DocPipeline& pipeline,
+        const std::vector<PageImage>& pageImages,
+        DocumentResult& result)
+    {
+        const auto ctx = pipeline.makeExecutionContext(nullptr);
+        pipeline.runDocumentFormulaStage(pageImages, result, ctx);
     }
 
     static void saveExtractedImages(

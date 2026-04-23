@@ -11,6 +11,7 @@
  */
 
 #include "table/table_recognizer.h"
+#include "table/table_classifier.h"
 #include "common/logger.h"
 
 #include <dxrt/inference_engine.h>
@@ -18,11 +19,15 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <numeric>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <tuple>
+
+namespace fs = std::filesystem;
 
 namespace rapid_doc {
 
@@ -31,6 +36,7 @@ namespace rapid_doc {
 // ============================================================================
 struct TableRecognizer::Impl {
     std::unique_ptr<dxrt::InferenceEngine> dxEngine;
+    std::unique_ptr<TableClassifier> classifier;
 };
 
 // ============================================================================
@@ -61,6 +67,28 @@ bool TableRecognizer::initialize() {
         LOG_ERROR("Failed to load UNET DX Engine model: {}", e.what());
         return false;
     }
+
+    // Optional: load the PaddleCls wired/wireless classifier. Failure is
+    // non-fatal — the geometric lineRatio heuristic acts as a safe fallback.
+    if (config_.enableTableCls && !config_.tableClsOnnxModelPath.empty()) {
+        TableClassifierConfig clsCfg;
+        clsCfg.onnxModelPath = config_.tableClsOnnxModelPath;
+        // Mirror Python OrtInferSession defaults (num_threads=-1 ⇒ leave alone).
+        clsCfg.intraOpThreads = -1;
+        clsCfg.disableCpuMemArena = true;
+        auto classifier = std::make_unique<TableClassifier>(clsCfg);
+        if (classifier->initialize()) {
+            impl_->classifier = std::move(classifier);
+            LOG_INFO("Table classifier enabled (paddle_cls.onnx)");
+        } else {
+            LOG_WARN(
+                "Table classifier unavailable; falling back to lineRatio heuristic (path={})",
+                config_.tableClsOnnxModelPath);
+        }
+    } else if (!config_.enableTableCls) {
+        LOG_INFO("Table classifier disabled by config; using lineRatio heuristic only");
+    }
+
     initialized_ = true;
     LOG_INFO("Table recognizer initialized successfully");
     return true;
@@ -737,11 +765,75 @@ TableRecognizer::NpuStageResult TableRecognizer::recognizeNpuStage(const cv::Mat
         return npuStage;
     }
 
+    // Routing: classifier (primary) → heuristic (fallback).
+    // We always compute the heuristic result for trace observability even
+    // when the classifier is active, but it only binds as the final verdict
+    // if the classifier produced no usable label.
     auto estimateStart = std::chrono::steady_clock::now();
-    npuStage.type = estimateTableType(tableImage);
+    const TableType heuristicType = estimateTableType(tableImage);
     auto estimateEnd = std::chrono::steady_clock::now();
     npuStage.estimateTableTypeMs =
         std::chrono::duration<double, std::milli>(estimateEnd - estimateStart).count();
+
+    // F3 routing gate:
+    //   - minSide < kClsMinSide (224) → bypass classifier (crop too small for
+    //     reliable 224x224 classification; its LANCZOS4 upscale would magnify
+    //     noise) and fall back to heuristic;
+    //   - classifier score < kClsScoreThresh (0.6) → low-confidence flip risk,
+    //     fall back to heuristic;
+    //   - classifier error / disabled → fall back to heuristic.
+    //   otherwise classifier verdict is authoritative.
+    constexpr float kClsScoreThresh = 0.60f;
+    constexpr int kClsMinSide = 224;
+
+    TableType resolvedType = TableType::UNKNOWN;
+    std::string clsLabel = "disabled";
+    std::string clsGate = "disabled"; // pass | small_crop | low_score | error | disabled
+    float clsScore = -1.0f;
+    double clsInferMs = 0.0;
+
+    const int minSide = std::min(tableImage.cols, tableImage.rows);
+    if (impl_->classifier && impl_->classifier->isInitialized()) {
+        if (minSide < kClsMinSide) {
+            clsGate = "small_crop";
+        } else {
+            TableClassifyResult cls = impl_->classifier->classify(tableImage);
+            clsLabel = cls.label;
+            clsScore = cls.score;
+            clsInferMs = cls.inferMs;
+            if (!cls.ok) {
+                clsGate = "error";
+            } else if (cls.score >= kClsScoreThresh) {
+                clsGate = "pass";
+                resolvedType = cls.type;
+            } else {
+                clsGate = "low_score";
+            }
+        }
+    }
+    if (resolvedType == TableType::UNKNOWN) {
+        resolvedType = heuristicType;
+    }
+    npuStage.type = resolvedType;
+
+    // Env-gated route summary: one line per table crop with cls + heuristic +
+    // final verdict + gate decision so downstream log diffs are trivial.
+    const char* routeTrace = std::getenv("RAPIDDOC_TABLE_TRACE");
+    if (routeTrace != nullptr && routeTrace[0] != '\0' && routeTrace[0] != '0') {
+        const char* heuristicStr =
+            (heuristicType == TableType::WIRED) ? "WIRED" :
+            (heuristicType == TableType::WIRELESS) ? "WIRELESS" : "UNKNOWN";
+        const char* finalStr =
+            (resolvedType == TableType::WIRED) ? "WIRED" :
+            (resolvedType == TableType::WIRELESS) ? "WIRELESS" : "UNKNOWN";
+        LOG_INFO(
+            "TABLE_ROUTE_TRACE route crop_size={}x{} cls_label={} cls_score={:.4f} "
+            "cls_gate={} cls_infer_ms={:.2f} heuristic_type={} final_type={}",
+            tableImage.cols, tableImage.rows,
+            clsLabel.c_str(), clsScore,
+            clsGate.c_str(), clsInferMs,
+            heuristicStr, finalStr);
+    }
 
     if (npuStage.type == TableType::WIRELESS) {
         npuStage.supported = false;
@@ -880,7 +972,19 @@ TableType TableRecognizer::estimateTableType(const cv::Mat& tableImage) {
     int vLinePixels = cv::countNonZero(vertical);
     int totalPixels = tableImage.cols * tableImage.rows;
     float lineRatio = static_cast<float>(hLinePixels + vLinePixels) / totalPixels;
-    return (lineRatio > 0.01f) ? TableType::WIRED : TableType::WIRELESS;
+    const TableType resolved = (lineRatio > 0.01f) ? TableType::WIRED : TableType::WIRELESS;
+
+    // Env-gated routing trace (no behavior change; zero I/O when unset).
+    const char* traceRaw = std::getenv("RAPIDDOC_TABLE_TRACE");
+    if (traceRaw != nullptr && traceRaw[0] != '\0' && traceRaw[0] != '0') {
+        LOG_INFO(
+            "TABLE_ROUTE_TRACE estimateTableType crop_size={}x{} hLinePixels={} "
+            "vLinePixels={} totalPixels={} lineRatio={:.6f} type={}",
+            tableImage.cols, tableImage.rows, hLinePixels, vLinePixels, totalPixels,
+            lineRatio,
+            (resolved == TableType::WIRED) ? "WIRED" : "WIRELESS");
+    }
+    return resolved;
 }
 
 } // namespace rapid_doc

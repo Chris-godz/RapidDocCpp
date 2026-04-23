@@ -28,13 +28,22 @@ struct ModelPaths {
 
     // Character dictionary (used by OCR recognition)
     std::string ocrDictPath;           // ppocrv5_dict.txt
+
+    // Formula recognition (ONNX Runtime)
+    std::string formulaOnnxModel;      // pp_formulanet_plus_m.onnx
+
+    // Table classifier (ONNX Runtime) — wired/wireless router (PaddleCls).
+    std::string tableClsOnnxModel;     // paddle_cls.onnx
+
+    // Wireless table structure model (ONNX Runtime) — SLANet+.
+    std::string slanetPlusOnnxModel;   // slanet-plus.onnx
 };
 
 /**
  * @brief Pipeline stage enable/disable switches
- * 
- * NOTE: Wireless table and table classification remain unsupported.
- * Formula regions are exposed as image fallbacks rather than LaTeX output.
+ *
+ * NOTE: Wireless table backend remains unsupported; only the table-type
+ * classifier (PaddleCls, wired/wireless) is available.
  */
 struct PipelineStages {
     bool enablePdfRender = true;        // PDF → page images
@@ -44,9 +53,14 @@ struct PipelineStages {
     bool enableReadingOrder = true;     // XY-Cut reading order sort
     bool enableMarkdownOutput = true;   // Generate Markdown output
 
-    bool enableFormula = true;          // Formula/equation image fallback
-    bool enableWirelessTable = false;   // Wireless table recognition (SLANet)
-    bool enableTableClassify = false;   // Table type classification
+    bool enableFormula = true;          // Formula/equation LaTeX recognition
+    bool enableWirelessTable = true;    // Wireless table recognition (SLANet+)
+    // Table wired/wireless routing via PaddleCls ONNX (paddle_cls.onnx).
+    // When true (default), classifier verdict is the primary router and the
+    // geometric lineRatio heuristic only serves as a fallback when the
+    // classifier is unavailable. When false, the legacy heuristic is used
+    // exclusively.
+    bool enableTableClassify = true;
 };
 
 /**

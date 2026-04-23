@@ -22,6 +22,8 @@
 
 namespace rapid_doc {
 
+class TableClassifier;
+
 /**
  * @brief Table recognizer configuration
  */
@@ -31,6 +33,15 @@ struct TableRecognizerConfig {
     float threshold = 0.5f;          // Segmentation threshold
     bool useAsync = false;           // Enable async inference
     int deviceId = -1;               // DXRT device affinity (-1 = runtime default)
+
+    // PaddleCls-based wired/wireless router (mirrors Python TableCls).
+    // When enableTableCls is true and tableClsOnnxModelPath resolves to an
+    // existing file, initialize() constructs a TableClassifier. At classify
+    // time, the classifier verdict overrides the legacy lineRatio heuristic.
+    // Any failure (missing file, init error, inference exception) silently
+    // falls back to estimateTableType().
+    bool enableTableCls = true;
+    std::string tableClsOnnxModelPath;
 };
 
 /**

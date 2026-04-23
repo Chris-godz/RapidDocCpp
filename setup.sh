@@ -79,6 +79,54 @@ done
 rm -f "$TABLE_DIR/unet.dxnn"
 cp -v "$DXNN_CACHE/unet.dxnn" "$TABLE_DIR/unet.dxnn"
 
+# --- Step 1b: Download PaddleCls table classifier (paddle_cls.onnx) ---
+# Mirrors Python rapid_doc/model/table/rapid_table_self/table_cls/main.py
+# which downloads this same file from modelscope. If the download fails (no
+# network / mirror unavailable), the C++ TableRecognizer falls back to the
+# legacy lineRatio heuristic at runtime.
+PADDLE_CLS_URL="https://www.modelscope.cn/models/RapidAI/RapidTable/resolve/master/table_cls/paddle_cls.onnx"
+PADDLE_CLS_DEST="$ONNX_CACHE/paddle_cls.onnx"
+if [ ! -f "$PADDLE_CLS_DEST" ] || [ "$FORCE" -eq 1 ]; then
+    echo ""
+    echo "[Step 1b] PaddleCls table classifier (paddle_cls.onnx) ..."
+    mkdir -p "$ONNX_CACHE"
+    if curl -fSL "$PADDLE_CLS_URL" -o "$PADDLE_CLS_DEST"; then
+        echo "  Downloaded to $PADDLE_CLS_DEST"
+    else
+        echo "  [WARN] paddle_cls.onnx download failed; TableRecognizer will fall back to lineRatio heuristic"
+        rm -f "$PADDLE_CLS_DEST"
+    fi
+else
+    echo "  [SKIP] paddle_cls.onnx already cached"
+fi
+
+# --- Step 1c: Fetch SLANet+ wireless table structure model (slanet-plus.onnx) ---
+# Mirrors Python rapid_doc/model/table/rapid_table_self/models/slanet-plus.onnx
+# which is consumed by PPTableStructurer for wireless tables. We prefer the
+# bundled RapidDoc workspace copy when present (no network required), then
+# fall back to the modelscope mirror. If both fail, the wireless backend is
+# disabled at runtime and the pipeline falls back to the legacy unsupported
+# placeholder — matching pre-port behavior for wireless crops.
+SLANET_DEST="$ONNX_CACHE/slanet-plus.onnx"
+SLANET_LOCAL="${SLANET_LOCAL_SRC:-$HOME/Desktop/RapidDoc/rapid_doc/model/table/rapid_table_self/models/slanet-plus.onnx}"
+SLANET_URL="https://www.modelscope.cn/models/RapidAI/RapidTable/resolve/v2.0.0/slanet-plus.onnx"
+if [ ! -f "$SLANET_DEST" ] || [ "$FORCE" -eq 1 ]; then
+    echo ""
+    echo "[Step 1c] SLANet+ wireless table structure (slanet-plus.onnx) ..."
+    mkdir -p "$ONNX_CACHE"
+    if [ -f "$SLANET_LOCAL" ]; then
+        cp -v "$SLANET_LOCAL" "$SLANET_DEST"
+        echo "  Copied from $SLANET_LOCAL"
+    elif curl -fSL "$SLANET_URL" -o "$SLANET_DEST"; then
+        echo "  Downloaded to $SLANET_DEST"
+    else
+        echo "  [WARN] slanet-plus.onnx unavailable; wireless backend disabled"
+        rm -f "$SLANET_DEST"
+    fi
+else
+    echo "  [SKIP] slanet-plus.onnx already cached"
+fi
+
 # --- Step 2: Download OCR models ---
 echo ""
 echo "[Step 2] DXNN-OCR-cpp models (detection + recognition) ..."

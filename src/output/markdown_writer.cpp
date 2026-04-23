@@ -36,11 +36,14 @@ std::string MarkdownWriter::elementToMarkdown(const ContentElement& elem) const 
         return {};
 
     case ContentElement::Type::EQUATION:
-        // Python: formula rendered as image (no LaTeX on NPU)
+        // Parity with Python pipeline_middle_json_mkcontent: interline
+        // equations are wrapped in `$$ ... $$` so that markdown renderers
+        // (KaTeX / MathJax) pick them up as display math. When LaTeX is
+        // unavailable we fall back to the cropped image, like Python.
+        if (!elem.text.empty())
+            return "\n$$\n" + elem.text + "\n$$\n\n";
         if (!elem.imagePath.empty())
             return "![](" + elem.imagePath + ")\n\n";
-        if (!elem.text.empty())
-            return elem.text + "\n\n";
         return {};
 
     case ContentElement::Type::HEADER:
